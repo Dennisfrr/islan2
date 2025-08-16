@@ -1,4 +1,4 @@
-import { BarChart3, Target, Users, Calendar, MessageCircle, Settings, Package, CheckSquare, MessageSquare, Instagram, FileText } from "lucide-react"
+import { BarChart3, Target, Users, Calendar, Settings, Package, CheckSquare, MessageSquare, FileText } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Separator } from "@/components/ui/separator"
@@ -19,13 +19,10 @@ export function CRMSidebar({ selectedView, onViewChange, collapsed }: CRMSidebar
     { id: "pipeline", label: "Pipeline", icon: Target },
     { id: "contacts", label: "Contatos", icon: Users },
     { id: "deals", label: "Propostas", icon: FileText },
-    // Products: somente manager/admin
-    ...(role === 'admin' || role === 'manager' ? [{ id: 'products', label: 'Produtos', icon: Package }] as const : []),
+    // Produtos removido
     { id: "activities", label: "Atividades", icon: CheckSquare },
     { id: "tasks", label: "Tarefas", icon: Calendar },
     { id: "whatsapp", label: "WhatsApp", icon: MessageSquare },
-    { id: "instagram", label: "Instagram", icon: Instagram },
-    { id: "messenger", label: "Messenger", icon: MessageCircle },
     // Employees: admin e manager (alinha com permissões do backend)
     ...(role === 'admin' || role === 'manager' ? [{ id: 'employees', label: 'Funcionários', icon: Users }] as const : []),
   ]
@@ -35,11 +32,13 @@ export function CRMSidebar({ selectedView, onViewChange, collapsed }: CRMSidebar
       {/* Logo */}
       <div className="p-4 border-b border-border bg-gradient-primary">
         <div className="flex items-center space-x-3">
-          <div className="w-8 h-8 bg-background rounded-lg flex items-center justify-center shadow-lg">
-            <span className="text-primary font-bold text-sm">R</span>
-          </div>
-          {!collapsed && (
-            <span className="text-lg font-semibold text-primary-foreground">Rmidia CRM</span>
+          {collapsed ? (
+            <span className="px-2 py-0.5 rounded-sm bg-amber-400 text-black text-sm font-extrabold tracking-wide">CRM</span>
+          ) : (
+            <div className="flex items-center min-w-0">
+              <span className="text-lg font-semibold text-primary-foreground truncate">Rmidia</span>
+              <span className="ml-2 px-2 py-0.5 rounded-sm bg-amber-400 text-black text-sm font-extrabold tracking-wide">CRM</span>
+            </div>
           )}
         </div>
       </div>
@@ -79,17 +78,7 @@ export function CRMSidebar({ selectedView, onViewChange, collapsed }: CRMSidebar
           </div>
         </TooltipProvider>
 
-        <Separator className="bg-border mt-2" />
-        
-        <div className="space-y-1 mt-2">
-          <Button
-            variant="ghost"
-            className="w-full justify-start text-muted-foreground hover:bg-primary/5 hover:text-primary transition-all duration-200"
-          >
-            <Settings className="h-4 w-4" />
-            {!collapsed && <span className="ml-2">Configurações</span>}
-          </Button>
-        </div>
+        {/* Configurações removida */}
       </nav>
 
       {/* User Profile */}

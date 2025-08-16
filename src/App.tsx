@@ -9,6 +9,7 @@ import KommoCRM from "./pages/KommoCRM";
 import { DealPreview } from "./pages/DealPreview";
 import Login from "./pages/Login";
 import NotFound from "./pages/NotFound";
+import ResetPassword from "./pages/ResetPassword";
 
 const queryClient = new QueryClient();
 
@@ -39,6 +40,7 @@ function AppRoutes() {
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={<Login />} />
+        <Route path="/reset-password" element={<ResetPassword />} />
         <Route 
           path="/" 
           element={

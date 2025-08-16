@@ -43,7 +43,7 @@ export function DealEditor({ open, onOpenChange, dealId }: { open: boolean; onOp
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl">
+      <DialogContent className="max-w-3xl overflow-auto">
         <DialogHeader>
           <DialogTitle>Editar Itens da Proposta {deal ? `— ${deal.title}` : ''}</DialogTitle>
         </DialogHeader>

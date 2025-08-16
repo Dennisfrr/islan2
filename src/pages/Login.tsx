@@ -8,6 +8,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useToast } from '@/hooks/use-toast'
 import { Loader2, Eye, EyeOff } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
+import { supabase } from '@/lib/supabase'
 
 export default function Login() {
   const [isLogin, setIsLogin] = useState(true)
@@ -48,6 +49,25 @@ export default function Login() {
         description: error.message,
         variant: 'destructive',
       })
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleForgotPassword = async () => {
+    if (!formData.email) {
+      toast({ title: 'Informe seu email', description: 'Preencha o email para receber o link de recuperação.' })
+      return
+    }
+    try {
+      setLoading(true)
+      const { error } = await supabase.auth.resetPasswordForEmail(formData.email, {
+        redirectTo: `${window.location.origin}/reset-password?type=recovery`,
+      })
+      if (error) throw error
+      toast({ title: 'Verifique seu email', description: 'Enviamos um link para redefinir sua senha.' })
+    } catch (err: any) {
+      toast({ title: 'Erro', description: err?.message || 'Não foi possível enviar o email.', variant: 'destructive' })
     } finally {
       setLoading(false)
     }
@@ -187,16 +207,27 @@ export default function Login() {
           </Tabs>
 
           <div className="mt-6 text-center">
-            <p className="text-sm text-gray-600">
-              {isLogin ? 'Não tem uma conta?' : 'Já tem uma conta?'}{' '}
-              <button
-                type="button"
-                className="text-blue-600 hover:text-blue-700 font-medium"
-                onClick={() => setIsLogin(!isLogin)}
-              >
-                {isLogin ? 'Criar conta' : 'Fazer login'}
-              </button>
-            </p>
+            <div className="flex flex-col gap-1 items-center">
+              <p className="text-sm text-gray-600">
+                {isLogin ? 'Não tem uma conta?' : 'Já tem uma conta?'}{' '}
+                <button
+                  type="button"
+                  className="text-blue-600 hover:text-blue-700 font-medium"
+                  onClick={() => setIsLogin(!isLogin)}
+                >
+                  {isLogin ? 'Criar conta' : 'Fazer login'}
+                </button>
+              </p>
+              {isLogin && (
+                <button
+                  type="button"
+                  className="text-xs text-blue-600 hover:text-blue-700"
+                  onClick={handleForgotPassword}
+                >
+                  Esqueci minha senha
+                </button>
+              )}
+            </div>
           </div>
         </CardContent>
       </Card>

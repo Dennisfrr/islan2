@@ -149,6 +149,37 @@ export function useFilteredLeads(filters: {
 export function useLeadStats() {
   const { leads } = useLeads()
 
+  // Janela de comparação: últimos 7 dias vs 7 dias anteriores
+  const now = new Date()
+  const msDay = 24 * 60 * 60 * 1000
+  const currentStart = new Date(now.getTime() - 7 * msDay)
+  const prevStart = new Date(now.getTime() - 14 * msDay)
+
+  const inWindow = (d: string | Date | null | undefined, start: Date, end: Date) => {
+    if (!d) return false
+    const t = new Date(d).getTime()
+    return t >= start.getTime() && t < end.getTime()
+  }
+
+  const sumValue = (arr: typeof leads) => arr.reduce((sum, l) => sum + Number(l.value || 0), 0)
+
+  const leadsCurrent = leads.filter(l => inWindow(l.created_at as any, currentStart, now))
+  const leadsPrev = leads.filter(l => inWindow(l.created_at as any, prevStart, currentStart))
+
+  const currTotal = leadsCurrent.length
+  const prevTotal = leadsPrev.length
+  const currValue = sumValue(leadsCurrent)
+  const prevValue = sumValue(leadsPrev)
+  const currClosed = leadsCurrent.filter(l => l.status === 'closed-won').length
+  const prevClosed = leadsPrev.filter(l => l.status === 'closed-won').length
+  const currConv = currTotal > 0 ? (currClosed / currTotal) * 100 : 0
+  const prevConv = prevTotal > 0 ? (prevClosed / prevTotal) * 100 : 0
+
+  const pctDelta = (curr: number, prev: number) => {
+    if (prev === 0) return curr > 0 ? 100 : 0
+    return ((curr - prev) / prev) * 100
+  }
+
   const stats = {
     total: leads.length,
     totalValue: leads.reduce((sum, lead) => sum + Number(lead.value), 0),
@@ -160,9 +191,16 @@ export function useLeadStats() {
       'closed-won': leads.filter(l => l.status === 'closed-won').length,
       'closed-lost': leads.filter(l => l.status === 'closed-lost').length,
     },
-    conversionRate: leads.length > 0 
-      ? (leads.filter(l => l.status === 'closed-won').length / leads.length) * 100 
+    conversionRate: leads.length > 0
+      ? (leads.filter(l => l.status === 'closed-won').length / leads.length) * 100
       : 0,
+    trends: {
+      periodLabel: 'vs 7 dias anteriores',
+      totalDeltaPct: pctDelta(currTotal, prevTotal),
+      totalValueDeltaPct: pctDelta(currValue, prevValue),
+      closedWonDeltaPct: pctDelta(currClosed, prevClosed),
+      conversionDeltaPp: currConv - prevConv,
+    }
   }
 
   return stats

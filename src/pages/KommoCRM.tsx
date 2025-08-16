@@ -15,14 +15,13 @@ import { useAuth } from "@/components/auth/AuthProvider"
 import { useLeads, useLeadStats } from "@/hooks/useLeads"
 import { CRMSidebar } from "@/components/crm/CRMSidebar"
 import { PipelineStage } from "@/components/crm/PipelineStage"
-import { ProductsManager } from "@/components/crm/ProductsManager"
+// Produtos removido
 import { ActivitiesView } from "@/components/crm/ActivitiesView"
 import { WhatsAppView } from "@/components/crm/WhatsAppView"
-import { InstagramView } from "@/components/crm/InstagramView"
-import { MessengerView } from "@/components/crm/MessengerView"
 import { EmployeesView } from "@/components/crm/EmployeesView"
 import { LeadTimeline } from "@/components/crm/LeadTimeline"
 import { DealsManager } from "@/components/crm/DealsManager"
+// Settings removida
 
 const pipelineStages = [
   { id: "new", name: "Novos Leads", color: "bg-blue-500", count: 0 },
@@ -529,7 +528,11 @@ export default function KommoCRM() {
                   </CardHeader>
                   <CardContent>
                     <div className="text-3xl font-bold text-primary">{stats.total}</div>
-                    <p className="text-xs text-success">+{Math.floor(Math.random() * 20)}% este mês</p>
+                    {Number.isFinite(stats.trends?.totalDeltaPct) && (
+                      <p className={`text-xs ${stats.trends.totalDeltaPct >= 0 ? 'text-success' : 'text-destructive'}`}>
+                        {stats.trends.totalDeltaPct >= 0 ? '+' : ''}{stats.trends.totalDeltaPct.toFixed(1)}% {stats.trends.periodLabel}
+                      </p>
+                    )}
                   </CardContent>
                 </Card>
 
@@ -539,7 +542,11 @@ export default function KommoCRM() {
                   </CardHeader>
                   <CardContent>
                     <div className="text-3xl font-bold text-primary">{stats.conversionRate.toFixed(1)}%</div>
-                    <p className="text-xs text-success">+2.1% este mês</p>
+                    {Number.isFinite(stats.trends?.conversionDeltaPp) && (
+                      <p className={`text-xs ${stats.trends.conversionDeltaPp >= 0 ? 'text-success' : 'text-destructive'}`}>
+                        {stats.trends.conversionDeltaPp >= 0 ? '+' : ''}{stats.trends.conversionDeltaPp.toFixed(1)} pp {stats.trends.periodLabel}
+                      </p>
+                    )}
                   </CardContent>
                 </Card>
 
@@ -549,7 +556,11 @@ export default function KommoCRM() {
                   </CardHeader>
                   <CardContent>
                     <div className="text-3xl font-bold text-primary">R$ {stats.totalValue.toLocaleString('pt-BR')}</div>
-                    <p className="text-xs text-success">+15.3% este mês</p>
+                    {Number.isFinite(stats.trends?.totalValueDeltaPct) && (
+                      <p className={`text-xs ${stats.trends.totalValueDeltaPct >= 0 ? 'text-success' : 'text-destructive'}`}>
+                        {stats.trends.totalValueDeltaPct >= 0 ? '+' : ''}{stats.trends.totalValueDeltaPct.toFixed(1)}% {stats.trends.periodLabel}
+                      </p>
+                    )}
                   </CardContent>
                 </Card>
 
@@ -559,7 +570,11 @@ export default function KommoCRM() {
                   </CardHeader>
                   <CardContent>
                     <div className="text-3xl font-bold text-primary">{stats.byStatus['closed-won']}</div>
-                    <p className="text-xs text-success">+8.2% este mês</p>
+                    {Number.isFinite(stats.trends?.closedWonDeltaPct) && (
+                      <p className={`text-xs ${stats.trends.closedWonDeltaPct >= 0 ? 'text-success' : 'text-destructive'}`}>
+                        {stats.trends.closedWonDeltaPct >= 0 ? '+' : ''}{stats.trends.closedWonDeltaPct.toFixed(1)}% {stats.trends.periodLabel}
+                      </p>
+                    )}
                   </CardContent>
                 </Card>
               </div>
@@ -684,10 +699,7 @@ export default function KommoCRM() {
             </div>
           )}
 
-          {/* Products View */}
-          {selectedView === "products" && (
-            <ProductsManager />
-          )}
+          {/* Products View removida */}
 
           {/* Deals/Propostas View */}
           {selectedView === "deals" && (
@@ -728,20 +740,14 @@ export default function KommoCRM() {
             <WhatsAppView />
           )}
 
-          {/* Instagram View */}
-          {selectedView === "instagram" && (
-            <InstagramView />
-          )}
-
-          {/* Messenger View */}
-          {selectedView === "messenger" && (
-            <MessengerView />
-          )}
+          
 
           {/* Employees View */}
           {selectedView === "employees" && (
             <EmployeesView />
           )}
+
+          {/* Settings View removida */}
 
           {/* Messages View */}
           {selectedView === "messages" && (

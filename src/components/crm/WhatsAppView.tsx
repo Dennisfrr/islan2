@@ -9,7 +9,7 @@ import { useLeads } from '@/hooks/useLeads'
 import { Loader2, PlugZap, Phone, Send } from 'lucide-react'
 import { WhatsAppSidebar } from '@/components/crm/WhatsApp/Sidebar'
 import { WhatsAppChat } from '@/components/crm/WhatsApp/Chat'
-import { useCommunications } from '@/hooks/useCommunications'
+import { useCommunications, type Communication } from '@/hooks/useCommunications'
 import { useCommunicationsInfinite } from '@/hooks/useCommunicationsInfinite'
 import { apiFetch } from '@/lib/api'
 
@@ -27,6 +27,8 @@ export function WhatsAppView() {
   const [phones, setPhones] = useState<PhoneOption[]>([])
   const [selectedPhoneId, setSelectedPhoneId] = useState<string | undefined>(undefined)
   const [selectedLeadId, setSelectedLeadId] = useState<string | undefined>(undefined)
+  const isDemo = true
+  const [demoMessages, setDemoMessages] = useState<Record<string, Communication[]>>({})
   const authHeader = useMemo(() => ({
     Authorization: session?.access_token ? `Bearer ${session.access_token}` : '',
   }), [session?.access_token])
@@ -34,16 +36,31 @@ export function WhatsAppView() {
   const fetchPhones = async () => {
     setLoading(true)
     try {
-      const r = await apiFetch('/api/whatsapp/phones', { headers: { ...authHeader } })
-      if (r.status === 400) {
-        setConnected(false)
-        setPhones([])
-        return
+      if (isDemo) {
+        setConnected(true)
+        const mock = [{ id: 'demo-phone-1', number: '+55 11 99999-0000', waba_id: 'demo' }]
+        setPhones(mock)
+        setSelectedPhoneId(mock[0].id)
+      } else {
+        // Primeiro checa status
+        const me = await apiFetch('/api/whatsapp/me', { headers: { ...authHeader } })
+        if (me.ok) {
+          const js = await me.json()
+          setConnected(Boolean(js.connected))
+          if (js.phone_number_id) setSelectedPhoneId(js.phone_number_id)
+        }
+
+        const r = await apiFetch('/api/whatsapp/phones', { headers: { ...authHeader } })
+        if (r.status === 400) {
+          setConnected(false)
+          setPhones([])
+          return
+        }
+        if (!r.ok) throw new Error('Falha ao obter números do WhatsApp')
+        const json = await r.json()
+        setConnected(true)
+        setPhones(json.phones || [])
       }
-      if (!r.ok) throw new Error('Falha ao obter números do WhatsApp')
-      const json = await r.json()
-      setConnected(true)
-      setPhones(json.phones || [])
     } catch (e) {
       setConnected(false)
       setPhones([])
@@ -72,6 +89,7 @@ export function WhatsAppView() {
 
   const handleConnect = async () => {
     try {
+      if (isDemo) return
       const r = await apiFetch('/auth/whatsapp/url', { headers: { ...authHeader } })
       if (!r.ok) throw new Error('Falha ao iniciar OAuth do WhatsApp')
       const { url } = await r.json()
@@ -100,61 +118,131 @@ export function WhatsAppView() {
   const infinite = useCommunicationsInfinite(selectedLeadId, 'whatsapp')
   const selectedLead = leads.find(l => l.id === selectedLeadId)
 
+  // Demo: mensagens locais por lead
+  useEffect(() => {
+    if (!isDemo) return
+    if (!selectedLeadId) return
+    setDemoMessages((prev) => {
+      if (prev[selectedLeadId]) return prev
+      const seed: Communication[] = [
+        {
+          id: 'demo-' + Math.random().toString(36).slice(2),
+          lead_id: selectedLeadId,
+          user_id: '',
+          type: 'whatsapp',
+          direction: 'inbound',
+          subject: null,
+          content: 'Olá! Como posso ajudar?',
+          status: 'read',
+          external_id: null,
+          created_at: new Date(Date.now() - 60_000).toISOString(),
+        },
+      ]
+      return { ...prev, [selectedLeadId]: seed }
+    })
+  }, [isDemo, selectedLeadId])
+
+  const demoSend = (text: string) => {
+    if (!selectedLeadId) return
+    const now = new Date().toISOString()
+    setDemoMessages((prev) => {
+      const list = prev[selectedLeadId] || []
+      const out: Communication = {
+        id: 'demo-' + Math.random().toString(36).slice(2),
+        lead_id: selectedLeadId,
+        user_id: '',
+        type: 'whatsapp',
+        direction: 'outbound',
+        subject: null,
+        content: text,
+        status: 'sent',
+        external_id: null,
+        created_at: now,
+      }
+      return { ...prev, [selectedLeadId]: [...list, out] }
+    })
+    // eco simulado
+    setTimeout(() => {
+      setDemoMessages((prev) => {
+        const list = prev[selectedLeadId] || []
+        const inbound: Communication = {
+          id: 'demo-' + Math.random().toString(36).slice(2),
+          lead_id: selectedLeadId,
+          user_id: '',
+          type: 'whatsapp',
+          direction: 'inbound',
+          subject: null,
+          content: 'Recebido 👍',
+          status: 'read',
+          external_id: null,
+          created_at: new Date().toISOString(),
+        }
+        return { ...prev, [selectedLeadId]: [...list, inbound] }
+      })
+    }, 800)
+  }
+
   return (
     <div className="flex-1 p-6 overflow-auto">
-      <div className="mb-4">
-        <h2 className="text-2xl font-bold text-foreground">WhatsApp</h2>
-        <p className="text-muted-foreground">Conecte sua conta do WhatsApp Business e converse com seus contatos.</p>
-      </div>
+      {!isDemo && (
+        <div className="mb-4">
+          <h2 className="text-2xl font-bold text-foreground">WhatsApp</h2>
+          <p className="text-muted-foreground">Conecte sua conta do WhatsApp Business e converse com seus contatos.</p>
+        </div>
+      )}
 
-      <Card className="mb-4">
-        <CardContent className="py-3 flex items-center justify-between">
-          {connected ? (
-            <div className="text-sm">Conta conectada. {phones.length > 0 ? 'Selecione o número preferido abaixo.' : 'Nenhum número encontrado.'}</div>
-          ) : (
-            <div className="text-sm text-muted-foreground">Nenhuma conta conectada.</div>
-          )}
-          <div className="flex items-center gap-2">
-            {!connected && (
-              <Button onClick={handleConnect} disabled={loading}>
-                {loading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <PlugZap className="h-4 w-4 mr-2" />}
-                Conectar WhatsApp
-              </Button>
+      {!isDemo && (
+        <Card className="mb-4">
+          <CardContent className="py-3 flex items-center justify-between">
+            {connected ? (
+              <div className="text-sm">Conta conectada. {phones.length > 0 ? 'Selecione o número preferido abaixo.' : 'Nenhum número encontrado.'}</div>
+            ) : (
+              <div className="text-sm text-muted-foreground">Nenhuma conta conectada.</div>
             )}
-          </div>
-        </CardContent>
-      </Card>
+            <div className="flex items-center gap-2">
+              {!connected && (
+                <Button onClick={handleConnect} disabled={loading}>
+                  {loading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <PlugZap className="h-4 w-4 mr-2" />}
+                  Conectar WhatsApp
+                </Button>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {connected && (
-        <div className="flex border border-border rounded-md bg-card overflow-hidden">
+        <div className="flex border border-border rounded-md bg-card overflow-hidden h-[78vh] min-h-[520px]">
           <WhatsAppSidebar
             leads={leads}
             selectedLeadId={selectedLeadId}
             onSelectLead={setSelectedLeadId as any}
           />
-          <div className="flex-1 flex flex-col">
-            <div className="h-12 border-b border-border px-3 flex items-center gap-2">
-              <Label className="text-xs text-muted-foreground">Número selecionado</Label>
-              <Select value={selectedPhoneId} onValueChange={setSelectedPhoneId as any}>
-                <SelectTrigger className="h-8 w-64">
-                  <SelectValue placeholder="Escolha um número" />
-                </SelectTrigger>
-                <SelectContent>
-                  {phones.map(p => (
-                    <SelectItem key={p.id} value={p.id}>{p.number}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <Button variant="outline" size="sm" onClick={() => selectedPhoneId && handleSelectPhone(selectedPhoneId)}>Usar</Button>
-            </div>
+          <div className="flex-1 flex flex-col min-w-0">
+            {!isDemo && (
+              <div className="h-12 border-b border-border px-3 flex items-center gap-2">
+                <Label className="text-xs text-muted-foreground">Número selecionado</Label>
+                <Select value={selectedPhoneId} onValueChange={setSelectedPhoneId as any}>
+                  <SelectTrigger className="h-8 w-64">
+                    <SelectValue placeholder="Escolha um número" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {phones.map(p => (
+                      <SelectItem key={p.id} value={p.id}>{p.number}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Button variant="outline" size="sm" onClick={() => selectedPhoneId && handleSelectPhone(selectedPhoneId)}>Usar</Button>
+              </div>
+            )}
             <WhatsAppChat
               lead={selectedLead}
-              messages={infinite.items.length ? infinite.items : communications}
-              onSend={(text) => selectedLeadId && sendMessage({ leadId: selectedLeadId, body: text })}
-              isSending={isSending}
-              onLoadMore={() => infinite.hasNextPage && infinite.fetchNextPage()}
-              hasMore={Boolean(infinite.hasNextPage)}
-              isLoadingMore={infinite.isFetchingNextPage}
+              messages={isDemo ? (demoMessages[selectedLeadId || ''] || []) : (infinite.items.length ? infinite.items : communications)}
+              onSend={(text) => isDemo ? demoSend(text) : (selectedLeadId && sendMessage({ leadId: selectedLeadId, body: text }))}
+              isSending={isDemo ? false : isSending}
+              onLoadMore={() => { if (!isDemo && infinite.hasNextPage) infinite.fetchNextPage() }}
+              hasMore={isDemo ? false : Boolean(infinite.hasNextPage)}
+              isLoadingMore={isDemo ? false : infinite.isFetchingNextPage}
             />
           </div>
         </div>

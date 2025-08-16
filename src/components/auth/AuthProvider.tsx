@@ -103,6 +103,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         data: {
           full_name: fullName,
         },
+        // Garante que o link de verificação aponte para a URL pública da aplicação
+        emailRedirectTo: `${window.location.origin}/login`,
       },
     })
     if (error) throw error

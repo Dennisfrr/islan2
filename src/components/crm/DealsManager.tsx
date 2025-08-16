@@ -128,18 +128,18 @@ export function DealsManager() {
           </div>
         ) : (
           filtered.map((d) => (
-            <Card key={d.id} className="bg-gradient-card border-border shadow-card">
+            <Card key={d.id} className="bg-gradient-card border-border shadow-card overflow-hidden break-words">
               <CardHeader>
                 <CardTitle className="flex items-center justify-between">
                   <span className="truncate">{d.title}</span>
                   <Badge variant="outline" className="capitalize text-xs">{d.status}</Badge>
                 </CardTitle>
               </CardHeader>
-              <CardContent className="p-4 space-y-3">
+              <CardContent className="p-4 space-y-3 overflow-hidden">
                 <div className="text-xs text-muted-foreground">Total</div>
                 <div className="text-xl font-bold text-primary">R$ {Number(d.total_value || 0).toLocaleString('pt-BR')}</div>
-                {d.description && <div className="text-sm text-muted-foreground line-clamp-2">{d.description}</div>}
-                <div className="flex items-center gap-2">
+                {d.description && <div className="text-sm text-muted-foreground line-clamp-2 break-words max-w-full">{d.description}</div>}
+                <div className="flex flex-wrap items-center gap-2">
                   <Button size="sm" variant="outline" onClick={() => setEditorDealId(d.id)}>
                     <FileText className="h-4 w-4 mr-2" /> Editar Itens
                   </Button>
@@ -147,7 +147,7 @@ export function DealsManager() {
                     <Share2 className="h-4 w-4 mr-2" /> Marcar como Enviada
                   </Button>
                   <Select onValueChange={(v) => updateDeal({ id: d.id, status: v as any })}>
-                    <SelectTrigger className="h-8 w-[180px]">
+                    <SelectTrigger className="h-8 w-full sm:w-[180px]">
                       <SelectValue placeholder="Alterar status">Alterar status</SelectValue>
                     </SelectTrigger>
                     <SelectContent>

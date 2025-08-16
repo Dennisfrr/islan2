@@ -18,6 +18,8 @@ const ALLOWED_ORIGINS = String(CORS_ORIGIN)
   .split(',')
   .map(o => o.trim())
   .filter(Boolean)
+// URL pública para montar links de redirecionamento em mensagens de convite/confirmacao
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || (ALLOWED_ORIGINS.find(o => o !== '*') || '')
 
 app.use(cors({
   origin: (origin, cb) => {
@@ -1072,6 +1074,49 @@ app.post('/api/whatsapp/select-number', async (req, res) => {
   }
 })
 
+// Informações da integração do WhatsApp do usuário atual
+app.get('/api/whatsapp/me', async (req, res) => {
+  try {
+    const user = await getUserFromAuthHeader(req)
+    if (!user) return res.status(401).json({ error: 'unauthorized' })
+
+    const { data: setting } = await supabaseAdmin
+      .from('settings')
+      .select('value')
+      .eq('user_id', user.id)
+      .eq('key', 'whatsapp')
+      .maybeSingle()
+
+    if (!setting) return res.json({ connected: false })
+
+    const phone_number_id = setting?.value?.phone_number_id || null
+    return res.json({ connected: true, phone_number_id })
+  } catch (e) {
+    console.error('[api/whatsapp/me] error', e)
+    return res.sendStatus(500)
+  }
+})
+
+// Desconectar WhatsApp (remove credenciais do usuário)
+app.post('/api/whatsapp/disconnect', async (req, res) => {
+  try {
+    const user = await getUserFromAuthHeader(req)
+    if (!user) return res.status(401).json({ error: 'unauthorized' })
+
+    const { error } = await supabaseAdmin
+      .from('settings')
+      .delete()
+      .eq('user_id', user.id)
+      .eq('key', 'whatsapp')
+    if (error) return res.status(500).json({ error: error.message })
+
+    return res.json({ ok: true })
+  } catch (e) {
+    console.error('[api/whatsapp/disconnect] error', e)
+    return res.sendStatus(500)
+  }
+})
+
 // Envio de mensagem WhatsApp para um lead (usa credenciais do owner do lead)
 app.post('/api/messages/whatsapp', async (req, res) => {
   try {
@@ -1246,7 +1291,10 @@ app.post('/api/employees', async (req, res) => {
 
     let newUser
     if (sendInvite) {
-      const { data, error } = await supabaseAdmin.auth.admin.inviteUserByEmail(email, { data: { full_name, role } })
+      const { data, error } = await supabaseAdmin.auth.admin.inviteUserByEmail(email, {
+        data: { full_name, role },
+        redirectTo: PUBLIC_BASE_URL ? `${PUBLIC_BASE_URL}/login` : undefined,
+      })
       if (error) return res.status(502).json({ error: error.message })
       newUser = data?.user
     } else {

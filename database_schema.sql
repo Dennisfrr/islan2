@@ -11,7 +11,7 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE TABLE public.profiles (
     id UUID REFERENCES auth.users NOT NULL PRIMARY KEY,
     full_name TEXT,
-    role TEXT CHECK (role IN ('admin', 'manager', 'sales')) DEFAULT 'sales',
+    role TEXT CHECK (role IN ('admin', 'manager', 'sales')) DEFAULT 'admin',
     avatar_url TEXT,
     company_name TEXT,
     phone TEXT,
@@ -377,16 +377,8 @@ CREATE POLICY "Admins can manage memberships" ON public.organization_members FOR
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS TRIGGER AS $$
 BEGIN
-    -- Se não existe nenhum admin/manager, o primeiro usuário vira admin
-    IF NOT EXISTS (
-        SELECT 1 FROM public.profiles p WHERE p.role IN ('admin','manager')
-    ) THEN
-        INSERT INTO public.profiles (id, full_name, role)
-        VALUES (NEW.id, NEW.raw_user_meta_data->>'full_name', 'admin');
-    ELSE
-        INSERT INTO public.profiles (id, full_name, role)
-        VALUES (NEW.id, NEW.raw_user_meta_data->>'full_name', 'sales');
-    END IF;
+    INSERT INTO public.profiles (id, full_name, role)
+    VALUES (NEW.id, NEW.raw_user_meta_data->>'full_name', 'admin');
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;

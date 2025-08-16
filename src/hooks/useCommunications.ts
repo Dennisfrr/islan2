@@ -9,7 +9,7 @@ export interface Communication {
   id: string
   lead_id: string
   user_id: string
-  type: 'email' | 'whatsapp' | 'sms' | 'call' | 'instagram' | 'messenger'
+  type: 'email' | 'whatsapp' | 'sms' | 'call'
   direction: 'inbound' | 'outbound'
   subject: string | null
   content: string | null
@@ -72,7 +72,7 @@ export function useCommunications(leadId?: string, type: Communication['type'] |
 
   const sendMutation = useMutation({
     mutationFn: async ({ leadId, body }: { leadId: string; body: string }) => {
-      const endpoint = type === 'instagram' ? '/api/messages/instagram' : type === 'messenger' ? '/api/messages/messenger' : '/api/messages/whatsapp'
+      const endpoint = '/api/messages/whatsapp'
       const r = await apiFetch(endpoint, {
         method: 'POST',
         headers: {
