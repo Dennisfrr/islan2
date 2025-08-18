@@ -155,6 +155,19 @@ CREATE TABLE public.settings (
 );
 
 -- ==========================================
+-- TABELA DE CONFIGURAÇÕES DA ORGANIZAÇÃO
+-- ==========================================
+CREATE TABLE IF NOT EXISTS public.organization_settings (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    organization_id UUID REFERENCES public.organizations(id) NOT NULL,
+    key TEXT NOT NULL,
+    value JSONB,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    UNIQUE(organization_id, key)
+);
+
+-- ==========================================
 -- MULTI-EMPRESA (TENANT) BÁSICO
 -- ==========================================
 -- (Seções antigas de organizations removidas do final para evitar duplicação)
@@ -177,6 +190,7 @@ CREATE TRIGGER handle_updated_at_activities BEFORE UPDATE ON public.activities F
 CREATE TRIGGER handle_updated_at_products BEFORE UPDATE ON public.products FOR EACH ROW EXECUTE PROCEDURE public.handle_updated_at();
 CREATE TRIGGER handle_updated_at_deals BEFORE UPDATE ON public.deals FOR EACH ROW EXECUTE PROCEDURE public.handle_updated_at();
 CREATE TRIGGER handle_updated_at_settings BEFORE UPDATE ON public.settings FOR EACH ROW EXECUTE PROCEDURE public.handle_updated_at();
+CREATE TRIGGER handle_updated_at_organization_settings BEFORE UPDATE ON public.organization_settings FOR EACH ROW EXECUTE PROCEDURE public.handle_updated_at();
 
 -- Preencher organization_id em leads automaticamente se não fornecido
 CREATE OR REPLACE FUNCTION public.set_default_org_on_leads()
@@ -213,6 +227,7 @@ ALTER TABLE public.communications ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.organizations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.organization_members ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.organization_settings ENABLE ROW LEVEL SECURITY;
 
 -- Políticas RLS
 
@@ -343,6 +358,32 @@ CREATE POLICY "Users can view own settings" ON public.settings FOR SELECT USING 
 CREATE POLICY "Users can insert own settings" ON public.settings FOR INSERT WITH CHECK (auth.uid() = user_id);
 CREATE POLICY "Users can update own settings" ON public.settings FOR UPDATE USING (auth.uid() = user_id);
 CREATE POLICY "Users can delete own settings" ON public.settings FOR DELETE USING (auth.uid() = user_id);
+
+-- Organization Settings: apenas admins/managers da org podem gerenciar
+CREATE POLICY "Org members can view org settings" ON public.organization_settings FOR SELECT USING (
+  EXISTS (
+    SELECT 1 FROM public.organization_members m
+    WHERE m.user_id = auth.uid() AND m.organization_id = organization_id
+  )
+);
+CREATE POLICY "Org admins can insert org settings" ON public.organization_settings FOR INSERT WITH CHECK (
+  EXISTS (
+    SELECT 1 FROM public.organization_members m
+    WHERE m.user_id = auth.uid() AND m.organization_id = organization_id AND m.role IN ('admin','manager')
+  )
+);
+CREATE POLICY "Org admins can update org settings" ON public.organization_settings FOR UPDATE USING (
+  EXISTS (
+    SELECT 1 FROM public.organization_members m
+    WHERE m.user_id = auth.uid() AND m.organization_id = organization_settings.organization_id AND m.role IN ('admin','manager')
+  )
+);
+CREATE POLICY "Org admins can delete org settings" ON public.organization_settings FOR DELETE USING (
+  EXISTS (
+    SELECT 1 FROM public.organization_members m
+    WHERE m.user_id = auth.uid() AND m.organization_id = organization_settings.organization_id AND m.role IN ('admin','manager')
+  )
+);
 
 -- Organizations: somente membros podem ver
 CREATE POLICY "Members can view organizations" ON public.organizations FOR SELECT USING (

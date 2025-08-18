@@ -17,6 +17,7 @@ import { CRMSidebar } from "@/components/crm/CRMSidebar"
 import { PipelineStage } from "@/components/crm/PipelineStage"
 // Produtos removido
 import { ActivitiesView } from "@/components/crm/ActivitiesView"
+import { SettingsView } from "@/components/crm/SettingsView"
 import { WhatsAppView } from "@/components/crm/WhatsAppView"
 import { EmployeesView } from "@/components/crm/EmployeesView"
 import { LeadTimeline } from "@/components/crm/LeadTimeline"
@@ -255,7 +256,9 @@ export default function KommoCRM() {
               </Button>
               <h1 className="text-xl font-semibold text-foreground">
                 {selectedView === "pipeline" ? "Pipeline de Vendas" : 
-                 selectedView === "dashboard" ? "Dashboard" : "Contatos"}
+                 selectedView === "dashboard" ? "Dashboard" : 
+                 selectedView === "contacts" ? "Contatos" : 
+                 selectedView === "settings" ? "Configurações" : ""}
               </h1>
             </div>
 
@@ -738,6 +741,11 @@ export default function KommoCRM() {
           {/* WhatsApp View */}
           {selectedView === "whatsapp" && (
             <WhatsAppView />
+          )}
+
+          {/* Settings View */}
+          {selectedView === "settings" && (
+            <SettingsView />
           )}
 
           

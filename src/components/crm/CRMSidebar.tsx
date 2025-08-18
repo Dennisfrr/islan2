@@ -23,6 +23,7 @@ export function CRMSidebar({ selectedView, onViewChange, collapsed }: CRMSidebar
     { id: "activities", label: "Atividades", icon: CheckSquare },
     { id: "tasks", label: "Tarefas", icon: Calendar },
     { id: "whatsapp", label: "WhatsApp", icon: MessageSquare },
+    { id: "settings", label: "Configurações", icon: Settings },
     // Employees: admin e manager (alinha com permissões do backend)
     ...(role === 'admin' || role === 'manager' ? [{ id: 'employees', label: 'Funcionários', icon: Users }] as const : []),
   ]

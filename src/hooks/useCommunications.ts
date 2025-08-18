@@ -42,8 +42,9 @@ export function useCommunications(leadId?: string, type: Communication['type'] |
   const { session } = useAuth()
   const { orgId } = useOrg()
 
+  const queryKey = ['communications', leadId, type, orgId] as const
   const { data: communications = [], isLoading, error, refetch } = useQuery({
-    queryKey: ['communications', leadId, type, orgId],
+    queryKey,
     queryFn: () => fetchCommunications(leadId as string, type, orgId || undefined),
     enabled: Boolean(leadId) && Boolean(orgId),
     refetchOnWindowFocus: false,
@@ -56,12 +57,12 @@ export function useCommunications(leadId?: string, type: Communication['type'] |
         event: '*',
         schema: 'public',
         table: 'communications',
-        filter: [
-          `lead_id=eq.${leadId}`,
-          ...(type ? [`type=eq.${type}`] : []),
-        ].join(','),
-      }, () => {
-        queryClient.invalidateQueries({ queryKey: ['communications', leadId, type] })
+        filter: `lead_id=eq.${leadId}`,
+      }, (payload) => {
+        const row = (payload as any)?.new || (payload as any)?.old || null
+        if (row && type && row.type && row.type !== type) return
+        queryClient.invalidateQueries({ queryKey })
+        queryClient.invalidateQueries({ queryKey: ['communications-infinite', leadId, type] })
       })
       .subscribe()
 
@@ -88,7 +89,8 @@ export function useCommunications(leadId?: string, type: Communication['type'] |
       return r.json()
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['communications', leadId, type] })
+      queryClient.invalidateQueries({ queryKey })
+      queryClient.invalidateQueries({ queryKey: ['communications-infinite', leadId, type] })
     },
   })
 

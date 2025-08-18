@@ -1,17 +1,21 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+// import { Input } from '@/components/ui/input'
+// import { Label } from '@/components/ui/label'
+// import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
 import { useAuth } from '@/components/auth/AuthProvider'
 import { useLeads } from '@/hooks/useLeads'
+import { useOrg } from '@/components/org/OrgProvider'
+import { useToast } from '@/hooks/use-toast'
 import { Loader2, PlugZap, Phone, Send } from 'lucide-react'
 import { WhatsAppSidebar } from '@/components/crm/WhatsApp/Sidebar'
 import { WhatsAppChat } from '@/components/crm/WhatsApp/Chat'
 import { useCommunications, type Communication } from '@/hooks/useCommunications'
 import { useCommunicationsInfinite } from '@/hooks/useCommunicationsInfinite'
 import { apiFetch } from '@/lib/api'
+import { supabase } from '@/lib/supabase'
 
 interface PhoneOption {
   id: string
@@ -21,14 +25,17 @@ interface PhoneOption {
 
 export function WhatsAppView() {
   const { session } = useAuth()
-  const { leads } = useLeads()
+  const { leads, refetch: refetchLeads } = useLeads()
+  const { orgId, orgRole } = useOrg()
+  const { toast } = useToast()
   const [loading, setLoading] = useState(false)
   const [connected, setConnected] = useState<boolean | null>(null)
   const [phones, setPhones] = useState<PhoneOption[]>([])
   const [selectedPhoneId, setSelectedPhoneId] = useState<string | undefined>(undefined)
   const [selectedLeadId, setSelectedLeadId] = useState<string | undefined>(undefined)
-  const isDemo = true
+  const isDemo = false
   const [demoMessages, setDemoMessages] = useState<Record<string, Communication[]>>({})
+  const [syncModalOpen, setSyncModalOpen] = useState(false)
   const authHeader = useMemo(() => ({
     Authorization: session?.access_token ? `Bearer ${session.access_token}` : '',
   }), [session?.access_token])
@@ -80,6 +87,27 @@ export function WhatsAppView() {
     return () => window.removeEventListener('message', onMessage)
   }, [])
 
+  // Realtime: ao receber uma comunicação inbound de WhatsApp na org, atualiza lista de leads e sugere seleção
+  useEffect(() => {
+    if (!orgId) return
+    const channel = supabase.channel(`realtime:wa-inbound:${orgId}`)
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'communications',
+        filter: `organization_id=eq.${orgId}`,
+      }, async (payload) => {
+        const row = (payload as any)?.new || null
+        if (!row) return
+        if (row.type !== 'whatsapp' || row.direction !== 'inbound') return
+        const leadId = row.lead_id as string | undefined
+        await refetchLeads()
+        if (!selectedLeadId && leadId) setSelectedLeadId(leadId)
+      })
+      .subscribe()
+    return () => { supabase.removeChannel(channel) }
+  }, [orgId, refetchLeads, selectedLeadId])
+
   useEffect(() => {
     if (!selectedLeadId) {
       const firstWithPhone = leads.find(l => (l.phone || '').toString().length > 0)
@@ -109,6 +137,41 @@ export function WhatsAppView() {
       })
       if (!r.ok) throw new Error('Falha ao selecionar número')
       setSelectedPhoneId(phone_number_id)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleSyncContacts = async (importLeads: boolean) => {
+    try {
+      if (!orgId) return
+      setLoading(true)
+      const r = await apiFetch('/api/org/whatsapp/zapi/sync-contacts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeader },
+        body: JSON.stringify({ organization_id: orgId, importLeads, page: 1, pageSize: 200 })
+      })
+      const js = await r.json()
+      if (!r.ok) throw new Error(js?.error || 'Falha ao sincronizar')
+      if (importLeads) {
+        toast({ title: 'Sincronizado', description: `Importados ${js.imported || 0} contatos para o pipeline.` })
+        await refetchLeads()
+      } else {
+        toast({ title: 'Sincronizado', description: `Contatos sincronizados (sem importar para o pipeline).` })
+      }
+      // Seleciona um lead com telefone, se nenhum selecionado
+      if (!selectedLeadId) {
+        const firstWithPhone = (js.chats || [])
+          .map((c: any) => String(c.phone || c.id || '').replace(/\D/g, ''))
+          .filter((p: string) => p.length > 0)[0]
+        if (firstWithPhone) {
+          const updatedList = (await refetchLeads()).data || []
+          const found = updatedList.find((l: any) => String(l.phone || '').replace(/\D/g, '').endsWith(firstWithPhone.slice(-8)))
+          if (found?.id) setSelectedLeadId(found.id)
+        }
+      }
+    } catch (e: any) {
+      toast({ title: 'Erro', description: e?.message || 'Falha ao sincronizar', variant: 'destructive' })
     } finally {
       setLoading(false)
     }
@@ -183,58 +246,36 @@ export function WhatsAppView() {
   }
 
   return (
-    <div className="flex-1 p-6 overflow-auto">
-      {!isDemo && (
-        <div className="mb-4">
-          <h2 className="text-2xl font-bold text-foreground">WhatsApp</h2>
-          <p className="text-muted-foreground">Conecte sua conta do WhatsApp Business e converse com seus contatos.</p>
+    <div className="flex-1 overflow-hidden bg-white dark:bg-[#111B21]">
+      {/* Top bar estilo WhatsApp (informativo e ações) */}
+      <div className="h-12 px-4 flex items-center justify-between bg-[#F0F2F5] dark:bg-[#202C33] border-b border-border">
+        <div className="text-sm text-foreground dark:text-[#E9EDEF]">
+          {connected ? 'Conta conectada.' : 'Nenhuma conta conectada.'}
         </div>
-      )}
+        <div className="flex items-center gap-2">
+          {connected ? (
+            <Button variant="outline" size="sm" onClick={() => setSyncModalOpen(true)} disabled={loading || !orgId}>
+              {loading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+              Sincronizar contatos
+            </Button>
+          ) : (
+            <Button onClick={handleConnect} disabled={loading}>
+              {loading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <PlugZap className="h-4 w-4 mr-2" />}
+              Conectar WhatsApp
+            </Button>
+          )}
+        </div>
+      </div>
 
-      {!isDemo && (
-        <Card className="mb-4">
-          <CardContent className="py-3 flex items-center justify-between">
-            {connected ? (
-              <div className="text-sm">Conta conectada. {phones.length > 0 ? 'Selecione o número preferido abaixo.' : 'Nenhum número encontrado.'}</div>
-            ) : (
-              <div className="text-sm text-muted-foreground">Nenhuma conta conectada.</div>
-            )}
-            <div className="flex items-center gap-2">
-              {!connected && (
-                <Button onClick={handleConnect} disabled={loading}>
-                  {loading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <PlugZap className="h-4 w-4 mr-2" />}
-                  Conectar WhatsApp
-                </Button>
-              )}
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
+      {/* Área principal — duas colunas sem cartões */}
       {connected && (
-        <div className="flex border border-border rounded-md bg-card overflow-hidden h-[78vh] min-h-[520px]">
+        <div className="h-[calc(100vh-12rem)] min-h-[520px] flex bg-white dark:bg-[#111B21]">
           <WhatsAppSidebar
             leads={leads}
             selectedLeadId={selectedLeadId}
             onSelectLead={setSelectedLeadId as any}
           />
           <div className="flex-1 flex flex-col min-w-0">
-            {!isDemo && (
-              <div className="h-12 border-b border-border px-3 flex items-center gap-2">
-                <Label className="text-xs text-muted-foreground">Número selecionado</Label>
-                <Select value={selectedPhoneId} onValueChange={setSelectedPhoneId as any}>
-                  <SelectTrigger className="h-8 w-64">
-                    <SelectValue placeholder="Escolha um número" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {phones.map(p => (
-                      <SelectItem key={p.id} value={p.id}>{p.number}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Button variant="outline" size="sm" onClick={() => selectedPhoneId && handleSelectPhone(selectedPhoneId)}>Usar</Button>
-              </div>
-            )}
             <WhatsAppChat
               lead={selectedLead}
               messages={isDemo ? (demoMessages[selectedLeadId || ''] || []) : (infinite.items.length ? infinite.items : communications)}
@@ -247,6 +288,25 @@ export function WhatsAppView() {
           </div>
         </div>
       )}
+      <Dialog open={syncModalOpen} onOpenChange={setSyncModalOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Sincronizar contatos do WhatsApp</DialogTitle>
+            <DialogDescription>
+              Deseja adicionar os contatos sincronizados ao pipeline (Kanban)? Você pode apenas sincronizar a lista ou importar os contatos como leads.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button variant="outline" onClick={() => { setSyncModalOpen(false); handleSyncContacts(false) }} disabled={loading || !orgId}>
+              Apenas sincronizar
+            </Button>
+            <Button onClick={() => { setSyncModalOpen(false); handleSyncContacts(true) }} disabled={loading || !orgId}>
+              {loading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+              Sincronizar e importar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 } 

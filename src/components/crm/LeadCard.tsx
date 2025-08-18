@@ -81,20 +81,20 @@ export function LeadCard({ lead, onView, onEdit, onDelete }: LeadCardProps) {
             </div>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="sm" className="h-6 w-6 p-0">
+                <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onPointerDown={(e) => e.stopPropagation()}>
                   <MoreHorizontal className="h-3 w-3" />
                 </Button>
               </DropdownMenuTrigger>
-             <DropdownMenuContent align="end" className="w-48">
-                <DropdownMenuItem onClick={onView}>
+             <DropdownMenuContent align="end" className="w-48" onPointerDown={(e) => e.stopPropagation()}>
+                <DropdownMenuItem onSelect={(e) => { e.preventDefault(); onView?.() }}>
                   <Eye className="h-4 w-4 mr-2" /> Ver detalhes
                 </DropdownMenuItem>
-                <DropdownMenuItem onClick={onEdit}>
+                <DropdownMenuItem onSelect={(e) => { e.preventDefault(); onEdit?.() }}>
                   <Edit className="h-4 w-4 mr-2" /> Editar
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
                {(role === 'admin' || role === 'manager') && (
-                 <DropdownMenuItem onClick={onDelete} className="text-destructive">
+                 <DropdownMenuItem onSelect={(e) => { e.preventDefault(); onDelete?.() }} className="text-destructive">
                    <Trash2 className="h-4 w-4 mr-2" /> Excluir
                  </DropdownMenuItem>
                )}
@@ -118,16 +118,16 @@ export function LeadCard({ lead, onView, onEdit, onDelete }: LeadCardProps) {
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-1">
               {lead.phone && (
-                <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={() => setOpen(true)} aria-label="Enviar WhatsApp">
+                <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onPointerDown={(e) => e.stopPropagation()} onClick={() => setOpen(true)} aria-label="Enviar WhatsApp">
                   <MessageCircle className="h-3 w-3" />
                 </Button>
               )}
               {lead.email && (
-                <Button variant="ghost" size="sm" className="h-6 w-6 p-0">
+                <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onPointerDown={(e) => e.stopPropagation()}>
                   <Mail className="h-3 w-3" />
                 </Button>
               )}
-              <Button variant="ghost" size="sm" className="h-6 w-6 p-0">
+              <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onPointerDown={(e) => e.stopPropagation()}>
                 <Phone className="h-3 w-3" />
               </Button>
             </div>
