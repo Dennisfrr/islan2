@@ -1,6 +1,6 @@
 import { useDroppable } from "@dnd-kit/core"
 import { SortableContext, verticalListSortingStrategy } from "@dnd-kit/sortable"
-import { Plus } from "lucide-react"
+import { Plus, Pencil, ListPlus } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -20,6 +20,9 @@ interface PipelineStageProps {
   onDeleteLead?: (leadId: string) => void
   onUpdateStatus?: (leadId: string, newStatus: Lead['status']) => void
   onCreateLeadInStage?: (status: Lead['status']) => void
+  onOpenChat?: (leadId: string) => void
+  onEditStages?: (stageId: string) => void
+  onBulkCreateInStage?: (status: Lead['status']) => void
 }
 
 export function PipelineStage({ 
@@ -29,6 +32,9 @@ export function PipelineStage({
   onEditLead, 
   onDeleteLead, 
   onCreateLeadInStage,
+  onOpenChat,
+  onEditStages,
+  onBulkCreateInStage,
 }: PipelineStageProps) {
   const { setNodeRef } = useDroppable({
     id: stage.id,
@@ -41,7 +47,20 @@ export function PipelineStage({
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <div className={`w-2.5 h-2.5 ${stage.color} rounded-full`} />
-          <h3 className="font-medium text-foreground text-sm">{stage.name}</h3>
+          <div className="flex items-center gap-1">
+            <h3 className="font-medium text-foreground text-sm">{stage.name}</h3>
+            {onEditStages && (
+              <Button
+                title="Editar estágios"
+                variant="ghost"
+                size="icon"
+                className="h-6 w-6 p-0"
+                onClick={() => onEditStages?.(stage.id)}
+              >
+                <Pencil className="h-3.5 w-3.5" />
+              </Button>
+            )}
+          </div>
           <Badge variant="secondary">{leads.length}</Badge>
         </div>
         <div className="flex items-center gap-2">
@@ -49,6 +68,11 @@ export function PipelineStage({
           <Button variant="ghost" size="sm" onClick={() => onCreateLeadInStage?.(stage.id as Lead['status'])}>
             <Plus className="h-4 w-4" />
           </Button>
+          {onBulkCreateInStage && (
+            <Button title="Criar vários" variant="ghost" size="sm" onClick={() => onBulkCreateInStage?.(stage.id as Lead['status'])}>
+              <ListPlus className="h-4 w-4" />
+            </Button>
+          )}
         </div>
       </div>
 
@@ -59,7 +83,8 @@ export function PipelineStage({
         </div>
       ) : (
         <ScrollArea className="flex-1">
-          <SortableContext id={stage.id} items={leads} strategy={verticalListSortingStrategy}>
+          {/* dnd-kit espera items como IDs dos sortables */}
+          <SortableContext id={stage.id} items={leads.map(l => l.id)} strategy={verticalListSortingStrategy}>
             <div className="space-y-3">
               {leads.map((lead) => (
                 <LeadCard 
@@ -68,6 +93,7 @@ export function PipelineStage({
                   onView={() => onViewLead?.(lead)}
                   onEdit={() => onEditLead?.(lead)}
                   onDelete={() => onDeleteLead?.(lead.id)}
+                  onOpenChat={(leadId) => onOpenChat?.(leadId)}
                 />
               ))}
             </div>

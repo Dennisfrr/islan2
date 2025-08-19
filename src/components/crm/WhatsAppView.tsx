@@ -23,7 +23,7 @@ interface PhoneOption {
   waba_id: string
 }
 
-export function WhatsAppView() {
+export function WhatsAppView({ initialLeadId }: { initialLeadId?: string }) {
   const { session } = useAuth()
   const { leads, refetch: refetchLeads } = useLeads()
   const { orgId, orgRole } = useOrg()
@@ -109,11 +109,15 @@ export function WhatsAppView() {
   }, [orgId, refetchLeads, selectedLeadId])
 
   useEffect(() => {
+    if (initialLeadId) {
+      setSelectedLeadId(initialLeadId)
+      return
+    }
     if (!selectedLeadId) {
       const firstWithPhone = leads.find(l => (l.phone || '').toString().length > 0)
       setSelectedLeadId(firstWithPhone?.id)
     }
-  }, [leads, selectedLeadId])
+  }, [leads, selectedLeadId, initialLeadId])
 
   const handleConnect = async () => {
     try {
@@ -146,7 +150,7 @@ export function WhatsAppView() {
     try {
       if (!orgId) return
       setLoading(true)
-      const r = await apiFetch('/api/org/whatsapp/zapi/sync-contacts', {
+      const r = await apiFetch('/api/org/whatsapp/wapi/sync-contacts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeader },
         body: JSON.stringify({ organization_id: orgId, importLeads, page: 1, pageSize: 200 })

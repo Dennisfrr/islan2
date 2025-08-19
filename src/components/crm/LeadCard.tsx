@@ -26,6 +26,7 @@ interface LeadCardProps {
   onEdit?: () => void
   onDelete?: () => void
   onUpdateStatus?: (leadId: string, newStatus: Lead['status']) => void
+  onOpenChat?: (leadId: string) => void
 }
 
 const statusOptions = [
@@ -37,7 +38,7 @@ const statusOptions = [
   { value: "closed-lost", label: "Perdido" },
 ]
 
-export function LeadCard({ lead, onView, onEdit, onDelete }: LeadCardProps) {
+export function LeadCard({ lead, onView, onEdit, onDelete, onOpenChat }: LeadCardProps) {
   const { role } = useAuth()
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: lead.id });
 
@@ -118,7 +119,20 @@ export function LeadCard({ lead, onView, onEdit, onDelete }: LeadCardProps) {
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-1">
               {lead.phone && (
-                <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onPointerDown={(e) => e.stopPropagation()} onClick={() => setOpen(true)} aria-label="Enviar WhatsApp">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 w-6 p-0"
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={() => {
+                    if (onOpenChat) {
+                      onOpenChat(lead.id)
+                    } else {
+                      setOpen(true)
+                    }
+                  }}
+                  aria-label="Abrir chat do WhatsApp"
+                >
                   <MessageCircle className="h-3 w-3" />
                 </Button>
               )}

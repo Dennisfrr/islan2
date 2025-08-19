@@ -19,6 +19,18 @@ export interface Communication {
   organization_id?: string
 }
 
+export interface QuickReply {
+  title: string
+  content: string
+}
+
+export interface WhatsAppMedia {
+  type: 'image' | 'video' | 'audio' | 'document'
+  url: string
+  caption?: string | null
+  filename?: string | null
+}
+
 async function fetchCommunications(
   leadId: string,
   type: Communication['type'] | undefined = 'whatsapp',
@@ -103,3 +115,86 @@ export function useCommunications(leadId?: string, type: Communication['type'] |
     isSending: sendMutation.isPending,
   }
 } 
+
+// Quick replies
+export function useQuickReplies() {
+  const { session } = useAuth()
+  const { orgId } = useOrg()
+  const queryClient = useQueryClient()
+
+  async function list(scope: 'user' | 'org' = 'user'): Promise<QuickReply[]> {
+    const qs = new URLSearchParams()
+    if (scope === 'org' && orgId) qs.set('scope', 'org'), qs.set('organization_id', orgId)
+    const r = await apiFetch(`/api/whatsapp/quick-replies?${qs.toString()}`, {
+      headers: {
+        ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+      },
+    })
+    if (!r.ok) throw new Error('Falha ao listar mensagens rápidas')
+    const js = await r.json()
+    const items = Array.isArray(js.items) ? js.items : []
+    return items.map((it: any) => {
+      if (typeof it === 'string') {
+        const t = it.length > 60 ? it.slice(0, 60) : it
+        return { title: t, content: it }
+      }
+      const content = String(it?.content ?? it?.text ?? '')
+      const title = String(it?.title || '').trim()
+      const finalTitle = title || (content ? (content.length > 60 ? content.slice(0, 60) : content) : '')
+      return { title: finalTitle, content }
+    }).filter((x: QuickReply) => x && x.content)
+  }
+
+  async function save(items: QuickReply[], scope: 'user' | 'org' = 'user'): Promise<void> {
+    const payload: any = { scope, items }
+    if (scope === 'org' && orgId) payload.organization_id = orgId
+    const r = await apiFetch('/api/whatsapp/quick-replies', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+      },
+      body: JSON.stringify(payload),
+    })
+    if (!r.ok) {
+      const t = await r.text(); throw new Error(t || 'Falha ao salvar mensagens rápidas')
+    }
+    queryClient.invalidateQueries({ queryKey: ['quick-replies', scope, orgId] })
+  }
+
+  return { list, save }
+}
+
+export function useWhatsAppMedia() {
+  const queryClient = useQueryClient()
+  const { session } = useAuth()
+  const { orgId } = useOrg()
+
+  const sendMediaMutation = useMutation({
+    mutationFn: async ({ leadId, media }: { leadId: string; media: WhatsAppMedia }) => {
+      const r = await apiFetch('/api/messages/whatsapp/media', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+        },
+        body: JSON.stringify({ leadId, media }),
+      })
+      if (!r.ok) {
+        const t = await r.text()
+        throw new Error(t || 'Falha ao enviar mídia')
+      }
+      return r.json()
+    },
+    onSuccess: (_data, variables) => {
+      const { leadId } = variables
+      queryClient.invalidateQueries({ queryKey: ['communications', leadId, 'whatsapp', orgId] })
+      queryClient.invalidateQueries({ queryKey: ['communications-infinite', leadId, 'whatsapp'] })
+    },
+  })
+
+  return {
+    sendMedia: sendMediaMutation.mutate,
+    isSendingMedia: sendMediaMutation.isPending,
+  }
+}

@@ -23,7 +23,8 @@ export interface Lead {
   phone?: string
   ig_username?: string
   value: number
-  status: 'new' | 'qualified' | 'proposal' | 'negotiation' | 'closed-won' | 'closed-lost'
+  // Status pode ser qualquer identificador de estágio configurado pela organização
+  status: string
   responsible: string
   source: string
   tags: string[]

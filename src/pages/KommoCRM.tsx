@@ -1,11 +1,11 @@
-import { useState, useEffect } from "react"
+import { useState, useEffect, useMemo } from "react"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { DndContext, closestCenter, DragEndEvent } from "@dnd-kit/core"
 import { Plus, Search, MoreHorizontal, Eye, Edit, Trash2, Download, Filter, Loader2, LogOut } from "lucide-react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogDescription, DialogFooter } from "@/components/ui/dialog"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
@@ -13,6 +13,8 @@ import { Badge } from "@/components/ui/badge"
 import { useToast } from "@/hooks/use-toast"
 import { useAuth } from "@/components/auth/AuthProvider"
 import { useLeads, useLeadStats } from "@/hooks/useLeads"
+import { useOrg } from "@/components/org/OrgProvider"
+import { apiFetch } from "@/lib/api"
 import { CRMSidebar } from "@/components/crm/CRMSidebar"
 import { PipelineStage } from "@/components/crm/PipelineStage"
 // Produtos removido
@@ -23,8 +25,9 @@ import { EmployeesView } from "@/components/crm/EmployeesView"
 import { LeadTimeline } from "@/components/crm/LeadTimeline"
 import { DealsManager } from "@/components/crm/DealsManager"
 // Settings removida
+import { QuickChat } from "@/components/crm/WhatsApp/QuickChat"
 
-const pipelineStages = [
+const defaultPipelineStages = [
   { id: "new", name: "Novos Leads", color: "bg-blue-500", count: 0 },
   { id: "qualified", name: "Qualificados", color: "bg-yellow-500", count: 0 },
   { id: "proposal", name: "Proposta", color: "bg-orange-500", count: 0 },
@@ -34,12 +37,15 @@ const pipelineStages = [
 ]
 
 export default function KommoCRM() {
-  const { user, role, signOut } = useAuth()
+  const { user, role, signOut, session } = useAuth()
+  const { orgId, orgRole } = useOrg()
   const { leads, isLoading, error, createLead, updateLead, deleteLead, isCreating, isUpdating, isDeleting } = useLeads()
   const stats = useLeadStats()
   const queryClient = useQueryClient()
   
   const [selectedView, setSelectedView] = useState("pipeline")
+  const [selectedChatLeadId, setSelectedChatLeadId] = useState<string | null>(null)
+  const [isQuickChatOpen, setIsQuickChatOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [searchTerm, setSearchTerm] = useState("")
   const [filterStatus, setFilterStatus] = useState<string>("all")
@@ -50,23 +56,48 @@ export default function KommoCRM() {
   const [selectedLead, setSelectedLead] = useState<any>(null)
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false)
   const [pendingCreateStatus, setPendingCreateStatus] = useState<string | null>(null)
+  const [isBulkCreateOpen, setIsBulkCreateOpen] = useState(false)
+  const [isAddStageOpen, setIsAddStageOpen] = useState(false)
+  const [newStageId, setNewStageId] = useState('')
+  const [newStageName, setNewStageName] = useState('')
   const [isEditModalOpen, setIsEditModalOpen] = useState(false)
   const [isDetailsModalOpen, setIsDetailsModalOpen] = useState(false)
   const { toast } = useToast()
+  // Carregar labels do pipeline (persistidos no backend)
+  useEffect(() => {
+    const load = async () => {
+      if (!orgId) return
+      try {
+        const r = await apiFetch(`/api/org/pipeline/config?organization_id=${encodeURIComponent(orgId)}`,
+          { headers: { ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}) } }
+        )
+        if (!r.ok) return
+        const js = await r.json()
+        const cfg = js?.config || null
+        if (cfg?.stageLabels) setStageLabels(cfg.stageLabels)
+      } catch {}
+    }
+    load()
+  }, [orgId, session?.access_token])
 
   const handleDragEnd = (event: DragEndEvent) => {
-    const { active, over } = event;
+    const { active, over } = event
+    if (!over) return
 
-    if (over && active.id !== over.id) {
-      const leadId = active.id as string;
-      const newStatus = over.id as any;
-      
-      const lead = leads.find(l => l.id === leadId);
-      if (lead && lead.status !== newStatus) {
-        handleUpdateLeadStatus(leadId, newStatus);
-      }
+    const leadId = String(active.id)
+    // Se estiver sobre um item (lead), usamos o containerId (que é o id do estágio)
+    const overContainerId = (over.data && (over.data as any).current && (over.data as any).current.sortable && (over.data as any).current.sortable.containerId) || null
+    const targetStageId = String(overContainerId || over.id)
+
+    // Garante que estamos movendo para um estágio válido do pipeline
+    const validStageIds = new Set(pipelineStages.map(s => s.id))
+    if (!validStageIds.has(targetStageId)) return
+
+    const lead = leads.find(l => l.id === leadId)
+    if (lead && lead.status !== targetStageId) {
+      handleUpdateLeadStatus(leadId, targetStageId as any)
     }
-  };
+  }
 
   // Unique options for filters
   const responsibleOptions = Array.from(new Set(leads.map(l => l.responsible))).filter(Boolean)
@@ -83,6 +114,23 @@ export default function KommoCRM() {
     const maxOk = !maxValue || lead.value <= Number(maxValue)
     return matchesSearch && matchesStatus && matchesResp && matchesSource && minOk && maxOk
   })
+
+  // Labels do pipeline
+  const [stageLabels, setStageLabels] = useState<Record<string, string>>({})
+  const [isEditStagesOpen, setIsEditStagesOpen] = useState(false)
+  const [savingStages, setSavingStages] = useState(false)
+
+  // Construir lista de estágios aplicando labels customizados
+  const pipelineStages = useMemo(() => {
+    // defaults com labels aplicados
+    const base = defaultPipelineStages.map(s => ({ ...s, name: stageLabels[s.id] || s.name }))
+    // extras vindos de stageLabels não presentes nos defaults
+    const defaultIds = new Set(base.map(s => s.id))
+    const extras = Object.entries(stageLabels || {})
+      .filter(([id]) => !defaultIds.has(id))
+      .map(([id, name]) => ({ id, name: String(name || id), color: 'bg-gray-500', count: 0 }))
+    return [...base, ...extras]
+  }, [stageLabels])
 
   // Stats por estágio (após filtros)
   const stageStats = pipelineStages.map(stage => {
@@ -333,17 +381,14 @@ export default function KommoCRM() {
                       </div>
                       <div>
                         <Label htmlFor="status">Status *</Label>
-                        <Select name="status" defaultValue={pendingCreateStatus || "new"}>
+                        <Select name="status" defaultValue={pendingCreateStatus || pipelineStages[0]?.id || 'new'}>
                           <SelectTrigger>
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            <SelectItem value="new">Novo</SelectItem>
-                            <SelectItem value="qualified">Qualificado</SelectItem>
-                            <SelectItem value="proposal">Proposta</SelectItem>
-                            <SelectItem value="negotiation">Negociação</SelectItem>
-                            <SelectItem value="closed-won">Fechado</SelectItem>
-                            <SelectItem value="closed-lost">Perdido</SelectItem>
+                            {pipelineStages.map(s => (
+                              <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
+                            ))}
                           </SelectContent>
                         </Select>
                       </div>
@@ -379,6 +424,88 @@ export default function KommoCRM() {
                </Dialog>
                )}
 
+              <Dialog open={isBulkCreateOpen} onOpenChange={setIsBulkCreateOpen}>
+                <DialogContent className="max-w-2xl">
+                  <DialogHeader>
+                    <DialogTitle>Criar vários leads</DialogTitle>
+                    <DialogDescription>Informe um lead por linha. Campos: Nome | Empresa | Telefone | Email | Valor. O status será "{pendingCreateStatus || 'new'}".</DialogDescription>
+                  </DialogHeader>
+                  <form onSubmit={async (e) => {
+                    e.preventDefault()
+                    const form = e.currentTarget as HTMLFormElement
+                    const textarea = form.elements.namedItem('bulk') as HTMLTextAreaElement
+                    const lines = (textarea.value || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+                    const created: any[] = []
+                    for (const line of lines) {
+                      const [name='', company='', phone='', email='', valueStr='0'] = line.split('|').map(s => s.trim())
+                      try {
+                        await createLead({
+                          name: name || 'Lead',
+                          company: company || '—',
+                          value: Number(valueStr || 0),
+                          status: (pendingCreateStatus as any) || 'new',
+                          responsible: user?.user_metadata?.full_name || '—',
+                          source: 'bulk',
+                          tags: [],
+                          email: email || null,
+                          phone: phone || null,
+                        } as any)
+                        created.push(name || company || phone || 'Lead')
+                      } catch {}
+                    }
+                    setIsBulkCreateOpen(false)
+                    toast({ title: 'Leads criados', description: `${created.length} lead(s) adicionados em ${pendingCreateStatus || 'new'}.` })
+                  }} className="space-y-3">
+                    <Textarea name="bulk" rows={10} placeholder={"Exemplos:\nMaria Silva | ACME | 11999999999 | maria@ex.com | 5000\nCarlos Lima | Beta Ltda | 11988887777 |  | 3000"} />
+                    <DialogFooter>
+                      <Button type="button" variant="outline" onClick={() => setIsBulkCreateOpen(false)}>Cancelar</Button>
+                      <Button type="submit">Criar</Button>
+                    </DialogFooter>
+                  </form>
+                </DialogContent>
+              </Dialog>
+
+              {/* Adicionar novo estágio */}
+              <Dialog open={isAddStageOpen} onOpenChange={setIsAddStageOpen}>
+                <DialogContent className="max-w-md">
+                  <DialogHeader>
+                    <DialogTitle>Novo estágio do pipeline</DialogTitle>
+                    <DialogDescription>Defina um identificador e um nome exibido. O identificador será usado internamente nos leads.</DialogDescription>
+                  </DialogHeader>
+                  <form onSubmit={async (e) => {
+                    e.preventDefault()
+                    if (!orgId) return
+                    const id = (newStageId || '').trim().toLowerCase().replace(/\s+/g, '-')
+                    const name = (newStageName || '').trim()
+                    if (!id || !name) return
+                    try {
+                      // Merge stageLabels e adiciona o novo
+                      const next = { ...stageLabels, [id]: name }
+                      const payload = { organization_id: orgId, stageLabels: next }
+                      const r = await apiFetch('/api/org/pipeline/config', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json', ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}) }, body: JSON.stringify(payload)
+                      })
+                      if (!r.ok) throw new Error('Falha ao salvar estágio')
+                      setStageLabels(next)
+                      setIsAddStageOpen(false)
+                    } catch {}
+                  }} className="space-y-3">
+                    <div>
+                      <Label htmlFor="stage-id">Identificador</Label>
+                      <Input id="stage-id" value={newStageId} onChange={(e) => setNewStageId(e.target.value)} placeholder="ex: follow-up" />
+                    </div>
+                    <div>
+                      <Label htmlFor="stage-name">Nome</Label>
+                      <Input id="stage-name" value={newStageName} onChange={(e) => setNewStageName(e.target.value)} placeholder="Ex.: Follow up" />
+                    </div>
+                    <DialogFooter>
+                      <Button type="button" variant="outline" onClick={() => setIsAddStageOpen(false)}>Cancelar</Button>
+                      <Button type="submit">Adicionar</Button>
+                    </DialogFooter>
+                  </form>
+                </DialogContent>
+              </Dialog>
+
               <div className="flex items-center gap-2">
                 <Badge variant="outline" className="uppercase text-[10px]">{role || '...'}</Badge>
                 <Button
@@ -390,6 +517,12 @@ export default function KommoCRM() {
                   <LogOut className="h-4 w-4 mr-2" />
                   Sair
                 </Button>
+                {(orgRole === 'admin' || orgRole === 'manager') && selectedView === 'pipeline' && (
+                  <>
+                    <Button variant="outline" size="sm" onClick={() => setIsEditStagesOpen(true)} className="ml-2">Editar estágios</Button>
+                    <Button variant="outline" size="sm" onClick={() => { setNewStageId(''); setNewStageName(''); setIsAddStageOpen(true) }}>Adicionar estágio</Button>
+                  </>
+                )}
               </div>
             </div>
           </div>
@@ -463,20 +596,7 @@ export default function KommoCRM() {
                 </CardContent>
               </Card>
 
-              {/* Pipeline Stats */}
-              <div className="mb-6 grid grid-cols-6 gap-4">
-                {stageStats.map((stage) => (
-                  <Card key={stage.id} className="text-center">
-                    <CardContent className="p-4">
-                      <div className={`w-4 h-4 ${stage.color} rounded-full mx-auto mb-2`}></div>
-                      <h3 className="text-sm font-medium text-foreground">{stage.name}</h3>
-                      <div className="text-2xl font-bold text-primary">{stage.count}</div>
-                      <div className="text-xs text-muted-foreground">leads</div>
-                      <div className="mt-1 text-xs text-foreground">R$ {stage.value.toLocaleString('pt-BR')}</div>
-                    </CardContent>
-                  </Card>
-                ))}
-              </div>
+              {/* (títulos removidos para evitar desalinhamento quando há mais de 6 estágios) */}
 
               {/* Kanban Board */}
               <DndContext collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
@@ -513,6 +633,32 @@ export default function KommoCRM() {
                         }
                         setPendingCreateStatus(status)
                         setIsCreateModalOpen(true)
+                      }}
+                      onOpenChat={(leadId) => { setSelectedChatLeadId(leadId); setIsQuickChatOpen(true) }}
+                      onEditStages={() => setIsEditStagesOpen(true)}
+                      onBulkCreateInStage={(status) => {
+                        if (role === 'sales') {
+                          toast({
+                            title: 'Permissão insuficiente',
+                            description: 'Somente Admin/Manager podem criar leads.',
+                            variant: 'destructive',
+                          })
+                          return
+                        }
+                        setPendingCreateStatus(status)
+                        setIsBulkCreateOpen(true)
+                      }}
+                      onBulkCreateInStage={(status) => {
+                        if (role === 'sales') {
+                          toast({
+                            title: 'Permissão insuficiente',
+                            description: 'Somente Admin/Manager podem criar leads.',
+                            variant: 'destructive',
+                          })
+                          return
+                        }
+                        setPendingCreateStatus(status)
+                        setIsBulkCreateOpen(true)
                       }}
                     />
                   )))}
@@ -740,7 +886,7 @@ export default function KommoCRM() {
 
           {/* WhatsApp View */}
           {selectedView === "whatsapp" && (
-            <WhatsAppView />
+            <WhatsAppView initialLeadId={selectedChatLeadId || undefined} />
           )}
 
           {/* Settings View */}
@@ -785,6 +931,9 @@ export default function KommoCRM() {
           )}
         </div>
       </div>
+
+      {/* Quick WhatsApp Chat Modal */}
+      <QuickChat leadId={selectedChatLeadId || undefined} open={isQuickChatOpen} onOpenChange={setIsQuickChatOpen} />
 
       {/* Lead Details Modal */}
       <Dialog open={isDetailsModalOpen} onOpenChange={setIsDetailsModalOpen}>
@@ -940,6 +1089,54 @@ export default function KommoCRM() {
               </div>
             </form>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Edit Pipeline Stages Modal */}
+      <Dialog open={isEditStagesOpen} onOpenChange={setIsEditStagesOpen}>
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Renomear estágios do pipeline</DialogTitle>
+            <DialogDescription>Personalize os nomes dos estágios para sua equipe.</DialogDescription>
+          </DialogHeader>
+          <form onSubmit={async (e) => {
+            e.preventDefault()
+            if (!orgId) return
+            setSavingStages(true)
+            try {
+              const payload = { organization_id: orgId, stageLabels }
+              const r = await apiFetch('/api/org/pipeline/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}) },
+                body: JSON.stringify(payload)
+              })
+              if (!r.ok) throw new Error('Falha ao salvar estágios')
+              setIsEditStagesOpen(false)
+            } catch (e: any) {
+              const msg = e?.message || 'Falha ao salvar estágios'
+              // opcional: toast de erro se disponível
+              try { /* toast pode estar fora de escopo aqui; ignoramos silenciosamente */ } catch {}
+              console.error('[pipeline] save error', msg)
+            }
+            setSavingStages(false)
+          }} className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              {[...defaultPipelineStages.map(s => s.id), ...Object.keys(stageLabels || {}).filter(id => !defaultPipelineStages.find(d => d.id === id))]
+                .map((id) => {
+                  const placeholder = defaultPipelineStages.find(d => d.id === id)?.name || id
+                  return (
+                    <div key={id}>
+                      <Label className="text-xs">{placeholder}</Label>
+                      <Input value={stageLabels[id] || ''} onChange={(e) => setStageLabels(prev => ({ ...prev, [id]: e.target.value }))} placeholder={placeholder} />
+                    </div>
+                  )
+              })}
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setIsEditStagesOpen(false)}>Cancelar</Button>
+              <Button type="submit" disabled={savingStages}>{savingStages ? 'Salvando...' : 'Salvar'}</Button>
+            </DialogFooter>
+          </form>
         </DialogContent>
       </Dialog>
     </div>

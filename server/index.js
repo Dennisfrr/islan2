@@ -41,91 +41,10 @@ const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { autoRefreshToken: false, persistSession: false }
 })
 
-// Provedor de WhatsApp: 'meta' (oficial), 'ultramsg' ou 'greenapi'
-const WHATSAPP_PROVIDER = (process.env.WHATSAPP_PROVIDER || 'zapi').toLowerCase()
+// Provedor de WhatsApp: 'meta' (oficial), 'wapi', 'ultramsg' ou 'greenapi'
+const WHATSAPP_PROVIDER = (process.env.WHATSAPP_PROVIDER || 'wapi').toLowerCase()
 
-// =============================
-// AI Pré-qualificação (helpers)
-// =============================
-async function getOrgAiPrequalConfig(orgId) {
-  if (!orgId) return null
-  try {
-    const { data } = await supabaseAdmin
-      .from('organization_settings')
-      .select('value')
-      .eq('organization_id', orgId)
-      .eq('key', 'ai_prequal')
-      .maybeSingle()
-    return data?.value || null
-  } catch {
-    return null
-  }
-}
-
-async function callAiPrequal(orgId, text) {
-  const cfg = await getOrgAiPrequalConfig(orgId)
-  if (!cfg || cfg.enabled === false) return null
-  const provider = (cfg.provider || process.env.AI_PROVIDER || 'openai').toLowerCase()
-  const model = cfg.model || process.env.AI_MODEL || 'gpt-4o-mini'
-  const system = cfg.system || 'Você é um analista de pré-vendas. Retorne JSON estrito com campos: qualified (boolean), score (0..1), stage (new|qualified|proposal|negotiation|closed-lost), lead_name, company, intent, notes.'
-  const userPrompt = `${cfg.prompt_prefix || 'Classifique o interesse do lead e proponha um estágio.'}\nMensagem: ${text}`
-  try {
-    let url = ''
-    let headers = { 'Content-Type': 'application/json' }
-    let body = {}
-    if (provider === 'openai') {
-      url = 'https://api.openai.com/v1/chat/completions'
-      headers.Authorization = `Bearer ${process.env.OPENAI_API_KEY || ''}`
-      body = { model, messages: [{ role: 'system', content: system }, { role: 'user', content: userPrompt }], temperature: 0.2 }
-    } else if (provider === 'openrouter') {
-      url = 'https://openrouter.ai/api/v1/chat/completions'
-      headers.Authorization = `Bearer ${process.env.OPENROUTER_API_KEY || ''}`
-      body = { model, messages: [{ role: 'system', content: system }, { role: 'user', content: userPrompt }], temperature: 0.2 }
-    } else if (provider === 'groq') {
-      url = 'https://api.groq.com/openai/v1/chat/completions'
-      headers.Authorization = `Bearer ${process.env.GROQ_API_KEY || ''}`
-      body = { model, messages: [{ role: 'system', content: system }, { role: 'user', content: userPrompt }], temperature: 0.2 }
-    } else if (provider === 'google' || provider === 'gemini') {
-      // Google Generative Language API (Gemini)
-      const apiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || ''
-      if (!apiKey) return null
-      const m = model || 'gemini-1.5-flash'
-      url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(m)}:generateContent?key=${encodeURIComponent(apiKey)}`
-      // Simples: concatenar system + userPrompt
-      body = {
-        contents: [
-          {
-            role: 'user',
-            parts: [{ text: `${system}\n\n${userPrompt}` }]
-          }
-        ]
-      }
-    } else {
-      return null
-    }
-    const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) })
-    const js = await r.json()
-    // OpenAI-like
-    let content = js?.choices?.[0]?.message?.content || ''
-    // Gemini response path
-    if (!content && Array.isArray(js?.candidates) && js.candidates[0]?.content?.parts?.[0]?.text) {
-      content = js.candidates[0].content.parts[0].text
-    }
-    const jsonStart = String(content).indexOf('{')
-    const jsonEnd = String(content).lastIndexOf('}')
-    const jsonStr = jsonStart >= 0 && jsonEnd >= 0 ? String(content).slice(jsonStart, jsonEnd + 1) : ''
-    if (!jsonStr) return null
-    const parsed = JSON.parse(jsonStr)
-    return parsed
-  } catch (e) {
-    console.error('[ai_prequal] call error', e)
-    return null
-  }
-}
-
-function queuePreQualification(ctx) {
-  try { setTimeout(() => handlePreQualification(ctx).catch(() => {}), 0) } catch {}
-}
+// (IA removida)
 
 async function pickOrgOwnerUserId(orgId) {
   try {
@@ -140,82 +59,7 @@ async function pickOrgOwnerUserId(orgId) {
   } catch { return null }
 }
 
-async function handlePreQualification({ orgId, phone, text, leadId }) {
-  if (!orgId || !text) return
-  const ai = await callAiPrequal(orgId, text)
-  if (!ai) return
-  const minScore = typeof ai.minScore === 'number' ? ai.minScore : undefined
-  const cfg = await getOrgAiPrequalConfig(orgId)
-  const threshold = cfg?.minScore ?? 0.6
-  const createLead = Boolean(cfg?.createLead ?? true)
-  const createDeal = Boolean(cfg?.createDeal ?? false)
-  const stageMap = cfg?.stageMap || { qualified: 'qualified', notQualified: 'new' }
-
-  const qualified = Boolean(ai.qualified)
-  const score = typeof ai.score === 'number' ? ai.score : 0
-  if (score < threshold && !qualified) {
-    return
-  }
-
-  let targetLeadId = leadId || null
-  // Criar lead se não existe
-  if (!targetLeadId && createLead) {
-    const ownerUserId = await pickOrgOwnerUserId(orgId)
-    if (!ownerUserId) return
-    const insert = {
-      name: ai.lead_name || (phone ? `Lead ${phone.slice(-4)}` : 'Lead WhatsApp'),
-      company: ai.company || '—',
-      email: null,
-      phone: phone || null,
-      ig_username: null,
-      value: 0,
-      status: qualified ? (stageMap.qualified || 'qualified') : (stageMap.notQualified || 'new'),
-      responsible: 'AI',
-      source: 'whatsapp',
-      tags: ['ai-prequal'],
-      notes: ai.notes || null,
-      user_id: ownerUserId,
-      organization_id: orgId,
-    }
-    const { data: lead, error } = await supabaseAdmin
-      .from('leads')
-      .insert([insert])
-      .select('*')
-      .single()
-    if (error) { console.error('[ai_prequal] create lead error', error.message); return }
-    targetLeadId = lead?.id || null
-  }
-
-  if (!targetLeadId) return
-
-  // Atualiza status e notas
-  try {
-    await supabaseAdmin
-      .from('leads')
-      .update({ status: qualified ? (stageMap.qualified || 'qualified') : (stageMap.notQualified || 'new'), notes: ai.notes || null })
-      .eq('id', targetLeadId)
-  } catch {}
-
-  // Cria deal se habilitado e qualificado
-  if (qualified && createDeal) {
-    try {
-      const { data: lead } = await supabaseAdmin.from('leads').select('*').eq('id', targetLeadId).single()
-      const ownerUserId = lead?.user_id || await pickOrgOwnerUserId(orgId)
-      await supabaseAdmin
-        .from('deals')
-        .insert([{
-          lead_id: targetLeadId,
-          title: ai.intent ? `Novo: ${ai.intent}` : 'Novo lead via WhatsApp',
-          description: ai.notes || null,
-          total_value: 0,
-          status: 'draft',
-          valid_until: null,
-          user_id: ownerUserId,
-          organization_id: orgId,
-        }])
-    } catch (e) { console.error('[ai_prequal] create deal error', e?.message || e) }
-  }
-}
+// (IA removida)
 
 async function sendWhatsAppNonOfficial(to, body, lead, userCfg) {
   const provider = (userCfg?.provider || WHATSAPP_PROVIDER)
@@ -269,8 +113,9 @@ async function sendWhatsAppNonOfficial(to, body, lead, userCfg) {
     // Conforme doc: POST https://api.w-api.app/v1/message/send-text?instanceId=INSTANCE_ID
     const base = String(baseUrl).replace(/\/$/, '')
     const url = `${base}/v1/message/send-text?instanceId=${encodeURIComponent(instanceId)}`
-    // Campos usuais: phone (E.164 digits) e text
-    const payload = { phone: to, text: body }
+    // Campos usuais variam entre implementações: alguns exigem "text", outros "message"/"body".
+    // Enviamos todos para maximizar compatibilidade sem impactar servidores que ignoram extras.
+    const payload = { phone: to, text: body, message: body, body }
     const resp = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -315,6 +160,76 @@ async function sendWhatsAppNonOfficial(to, body, lead, userCfg) {
   throw new Error('Provedor não-oficial desconhecido')
 }
 
+// Envio de mídia para provedores não-oficiais (W-API foco principal)
+async function sendWhatsAppNonOfficialMedia(to, media, lead, userCfg) {
+  const provider = (userCfg?.provider || WHATSAPP_PROVIDER)
+  if (provider !== 'wapi') {
+    throw new Error('Envio de mídia suportado apenas para W-API neste endpoint')
+  }
+  const baseUrl = userCfg?.base_url || process.env.WAPI_BASE_URL
+  const instanceId = userCfg?.instance_id || process.env.WAPI_INSTANCE_ID
+  const token = userCfg?.token || process.env.WAPI_TOKEN
+  if (!baseUrl || !instanceId || !token) throw new Error('W-API não configurado')
+  const base = String(baseUrl).replace(/\/$/, '')
+
+  const type = String(media?.type || '').toLowerCase()
+  const url = String(media?.url || '')
+  const caption = media?.caption || null
+  const filename = media?.filename || null
+  if (!to || !type || !url) throw new Error('Parâmetros inválidos: to, type e url são obrigatórios')
+
+  // Candidatos de endpoints/payloads conforme variações comuns da W-API
+  const candidates = []
+  if (type === 'image') {
+    candidates.push({
+      url: `${base}/v1/message/send-image?instanceId=${encodeURIComponent(instanceId)}`,
+      payload: { phone: to, url, ...(caption ? { caption } : {}) }
+    })
+  } else if (type === 'video') {
+    candidates.push({
+      url: `${base}/v1/message/send-video?instanceId=${encodeURIComponent(instanceId)}`,
+      payload: { phone: to, url, ...(caption ? { caption } : {}) }
+    })
+  } else if (type === 'audio') {
+    candidates.push({
+      url: `${base}/v1/message/send-audio?instanceId=${encodeURIComponent(instanceId)}`,
+      payload: { phone: to, url }
+    })
+  } else if (type === 'document' || type === 'file' || type === 'pdf') {
+    candidates.push({
+      url: `${base}/v1/message/send-document?instanceId=${encodeURIComponent(instanceId)}`,
+      payload: { phone: to, url, ...(filename ? { filename } : {}), ...(caption ? { caption } : {}) }
+    })
+  }
+  // Fallback genérico (algumas variantes expõem send-media)
+  candidates.push({
+    url: `${base}/v1/message/send-media?instanceId=${encodeURIComponent(instanceId)}`,
+    payload: { phone: to, type, url, ...(filename ? { filename } : {}), ...(caption ? { caption } : {}) }
+  })
+
+  let lastError = null
+  for (const c of candidates) {
+    try {
+      const resp = await fetch(c.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(c.payload)
+      })
+      let json = null
+      try { json = await resp.json() } catch {}
+      if (!resp.ok || (json && (json.error || (json.code && Number(json.code) >= 400)))) {
+        lastError = (json && (json.message || json.error)) || `HTTP ${resp.status}`
+        continue
+      }
+      const externalId = (json && (json.id || json.messageId || json.data?.id || json?.messageId)) || null
+      return externalId
+    } catch (e) {
+      lastError = e?.message || String(e)
+    }
+  }
+  throw new Error(lastError || 'Falha ao enviar mídia via W-API')
+}
+
 // Helpers para webhooks Meta (assinatura)
 function verifyMetaSignature(req) {
   try {
@@ -348,6 +263,31 @@ function parseJsonBody(req) {
 
 function normalizePhoneDigits(value) {
   return String(value || '').replace(/\D/g, '')
+}
+
+// Validação opcional para webhooks W-API
+function verifyWapiSignature(req) {
+  try {
+    const expectedToken = process.env.WAPI_WEBHOOK_TOKEN
+    const providedToken = (req.query && (req.query.token || req.query.auth)) || null
+    if (expectedToken) {
+      if (!providedToken || String(providedToken) !== String(expectedToken)) return false
+      return true
+    }
+    const secret = process.env.WAPI_WEBHOOK_SECRET
+    const header = req.headers['x-wapi-signature'] || req.headers['x-signature']
+    if (secret && header) {
+      const bodyBuffer = Buffer.isBuffer(req.body) ? req.body : Buffer.from(typeof req.body === 'string' ? req.body : JSON.stringify(req.body || {}))
+      const hmac = crypto.createHmac('sha256', secret)
+      hmac.update(bodyBuffer)
+      const digest = hmac.digest('hex')
+      const provided = String(header).replace(/^sha256=/, '')
+      return crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(digest))
+    }
+    return true
+  } catch {
+    return false
+  }
 }
 
 // Extratores mais robustos para webhooks não-oficiais
@@ -1469,10 +1409,10 @@ app.get('/api/whatsapp/me', async (req, res) => {
     if (WHATSAPP_PROVIDER !== 'meta' || non || orgCfg) {
       const cfg = non?.value || orgCfg?.value
       const connected = Boolean(cfg?.provider && cfg?.instance_id && cfg?.token) || (
-        WHATSAPP_PROVIDER === 'zapi' && Boolean(process.env.ZAPI_INSTANCE_ID && process.env.ZAPI_TOKEN)
+        (WHATSAPP_PROVIDER === 'wapi') && Boolean(process.env.WAPI_INSTANCE_ID && process.env.WAPI_TOKEN)
       )
-      const id = cfg?.instance_id || process.env.ZAPI_INSTANCE_ID || null
-      return res.json({ connected, phone_number_id: connected && id ? `${cfg?.provider || 'zapi'}:${id}` : null })
+      const id = cfg?.instance_id || process.env.WAPI_INSTANCE_ID || null
+      return res.json({ connected, phone_number_id: connected && id ? `${cfg?.provider || 'wapi'}:${id}` : null })
     }
 
     const { data: setting } = await supabaseAdmin
@@ -1560,6 +1500,63 @@ app.get('/api/org/ai-prequal/config', async (req, res) => {
     return res.json({ config: data?.value || null })
   } catch (e) {
     console.error('[api/org/ai-prequal/config:get] error', e)
+    return res.sendStatus(500)
+  }
+})
+
+// Configuração do Pipeline (rótulos de estágios) por organização
+app.post('/api/org/pipeline/config', async (req, res) => {
+  try {
+    const user = await getUserFromAuthHeader(req)
+    if (!user) return res.status(401).json({ error: 'unauthorized' })
+    const { organization_id, stageLabels } = req.body || {}
+    if (!organization_id) return res.status(400).json({ error: 'organization_id é obrigatório' })
+    if (!stageLabels || typeof stageLabels !== 'object') return res.status(400).json({ error: 'stageLabels é obrigatório' })
+
+    const { data: membership } = await supabaseAdmin
+      .from('organization_members')
+      .select('role')
+      .eq('user_id', user.id)
+      .eq('organization_id', organization_id)
+      .maybeSingle()
+    if (!membership || !['admin','manager'].includes(String(membership.role))) return res.status(403).json({ error: 'forbidden' })
+
+    const value = { stageLabels }
+    const { error } = await supabaseAdmin
+      .from('organization_settings')
+      .upsert({ organization_id, key: 'pipeline', value, updated_at: new Date().toISOString() }, { onConflict: 'organization_id,key' })
+    if (error) return res.status(500).json({ error: error.message })
+    return res.json({ ok: true })
+  } catch (e) {
+    console.error('[api/org/pipeline/config] error', e)
+    return res.sendStatus(500)
+  }
+})
+
+app.get('/api/org/pipeline/config', async (req, res) => {
+  try {
+    const user = await getUserFromAuthHeader(req)
+    if (!user) return res.status(401).json({ error: 'unauthorized' })
+    const organization_id = String(req.query.organization_id || '')
+    if (!organization_id) return res.status(400).json({ error: 'organization_id é obrigatório' })
+
+    const { data: membership } = await supabaseAdmin
+      .from('organization_members')
+      .select('role')
+      .eq('user_id', user.id)
+      .eq('organization_id', organization_id)
+      .maybeSingle()
+    if (!membership) return res.status(403).json({ error: 'forbidden' })
+
+    const { data } = await supabaseAdmin
+      .from('organization_settings')
+      .select('value')
+      .eq('organization_id', organization_id)
+      .eq('key', 'pipeline')
+      .maybeSingle()
+    return res.json({ config: data?.value || null })
+  } catch (e) {
+    console.error('[api/org/pipeline/config:get] error', e)
     return res.sendStatus(500)
   }
 })
@@ -1766,6 +1763,216 @@ app.post('/api/org/whatsapp/nonofficial/disconnect', async (req, res) => {
   }
 })
 
+// Quick Replies (WhatsApp) — listar
+app.get('/api/whatsapp/quick-replies', async (req, res) => {
+  try {
+    const user = await getUserFromAuthHeader(req)
+    if (!user) return res.status(401).json({ error: 'unauthorized' })
+    const scope = String(req.query.scope || 'user')
+    if (scope === 'org' || scope === 'organization') {
+      const organization_id = String(req.query.organization_id || '')
+      if (!organization_id) return res.status(400).json({ error: 'organization_id é obrigatório' })
+      // Qualquer membro pode ler
+      const { data: membership } = await supabaseAdmin
+        .from('organization_members')
+        .select('role')
+        .eq('user_id', user.id)
+        .eq('organization_id', organization_id)
+        .maybeSingle()
+      if (!membership) return res.status(403).json({ error: 'forbidden' })
+      const { data } = await supabaseAdmin
+        .from('organization_settings')
+        .select('value')
+        .eq('organization_id', organization_id)
+        .eq('key', 'whatsapp_quick_replies')
+        .maybeSingle()
+      const raw = (data?.value?.items || data?.value || []) || []
+      const items = (Array.isArray(raw) ? raw : []).map((it) => {
+        if (typeof it === 'string') {
+          const t = it.length > 60 ? it.slice(0, 60) : it
+          return { title: t, content: it }
+        }
+        const content = String(it?.content ?? it?.text ?? '')
+        const title = String(it?.title || '').trim()
+        const finalTitle = title || (content ? (content.length > 60 ? content.slice(0, 60) : content) : '')
+        return { title: finalTitle, content }
+      }).filter((x) => x && x.content)
+      return res.json({ items })
+    }
+    // user scope
+    const { data } = await supabaseAdmin
+      .from('settings')
+      .select('value')
+      .eq('user_id', user.id)
+      .eq('key', 'whatsapp_quick_replies')
+      .maybeSingle()
+    const raw = (data?.value?.items || data?.value || []) || []
+    const items = (Array.isArray(raw) ? raw : []).map((it) => {
+      if (typeof it === 'string') {
+        const t = it.length > 60 ? it.slice(0, 60) : it
+        return { title: t, content: it }
+      }
+      const content = String(it?.content ?? it?.text ?? '')
+      const title = String(it?.title || '').trim()
+      const finalTitle = title || (content ? (content.length > 60 ? content.slice(0, 60) : content) : '')
+      return { title: finalTitle, content }
+    }).filter((x) => x && x.content)
+    return res.json({ items })
+  } catch (e) {
+    console.error('[quick-replies:get] error', e)
+    return res.sendStatus(500)
+  }
+})
+
+// Quick Replies (WhatsApp) — salvar
+app.post('/api/whatsapp/quick-replies', async (req, res) => {
+  try {
+    const user = await getUserFromAuthHeader(req)
+    if (!user) return res.status(401).json({ error: 'unauthorized' })
+    const { scope = 'user', organization_id, items } = req.body || {}
+    if (!Array.isArray(items)) return res.status(400).json({ error: 'items deve ser uma lista' })
+    const normalized = items.map((it) => {
+      if (typeof it === 'string') {
+        const t = it.length > 60 ? it.slice(0, 60) : it
+        return { title: t, content: it }
+      }
+      const content = String(it?.content ?? it?.text ?? '').trim()
+      const title = String(it?.title || '').trim()
+      const finalTitle = title || (content ? (content.length > 60 ? content.slice(0, 60) : content) : '')
+      return { title: finalTitle, content }
+    }).filter((x) => x && x.content)
+    const value = { items: normalized }
+    if (String(scope) === 'org' || String(scope) === 'organization') {
+      if (!organization_id) return res.status(400).json({ error: 'organization_id é obrigatório' })
+      // Apenas admin/manager pode salvar
+      const { data: membership } = await supabaseAdmin
+        .from('organization_members')
+        .select('role')
+        .eq('user_id', user.id)
+        .eq('organization_id', organization_id)
+        .maybeSingle()
+      if (!membership || !['admin','manager'].includes(String(membership.role))) return res.status(403).json({ error: 'forbidden' })
+      const { error } = await supabaseAdmin
+        .from('organization_settings')
+        .upsert({ organization_id, key: 'whatsapp_quick_replies', value, updated_at: new Date().toISOString() }, { onConflict: 'organization_id,key' })
+      if (error) return res.status(500).json({ error: error.message })
+      return res.json({ ok: true })
+    }
+    // user scope
+    const { error } = await supabaseAdmin
+      .from('settings')
+      .upsert({ user_id: user.id, key: 'whatsapp_quick_replies', value, updated_at: new Date().toISOString() }, { onConflict: 'user_id,key' })
+    if (error) return res.status(500).json({ error: error.message })
+    return res.json({ ok: true })
+  } catch (e) {
+    console.error('[quick-replies:post] error', e)
+    return res.sendStatus(500)
+  }
+})
+
+// Listar chats/contatos do provedor (W-API) e opcionalmente importar como leads
+app.post('/api/org/whatsapp/wapi/sync-contacts', async (req, res) => {
+  try {
+    const user = await getUserFromAuthHeader(req)
+    if (!user) return res.status(401).json({ error: 'unauthorized' })
+    const { organization_id, importLeads = false, page = 1, pageSize = 100 } = req.body || {}
+    if (!organization_id) return res.status(400).json({ error: 'organization_id é obrigatório' })
+
+    // Verifica membership
+    const { data: membership } = await supabaseAdmin
+      .from('organization_members')
+      .select('role')
+      .eq('user_id', user.id)
+      .eq('organization_id', organization_id)
+      .maybeSingle()
+    if (!membership) return res.status(403).json({ error: 'forbidden' })
+
+    // Carrega config org (wapi)
+    const { data: orgCfg } = await supabaseAdmin
+      .from('organization_settings')
+      .select('value')
+      .eq('organization_id', organization_id)
+      .eq('key', 'whatsapp_nonofficial')
+      .maybeSingle()
+    const cfg = orgCfg?.value || {}
+    if ((cfg.provider || 'wapi') !== 'wapi') return res.status(400).json({ error: 'provider_not_wapi' })
+    const baseUrl = cfg.base_url || process.env.WAPI_BASE_URL || 'https://api.w-api.app'
+    const instanceId = cfg.instance_id || process.env.WAPI_INSTANCE_ID
+    const token = cfg.token || process.env.WAPI_TOKEN
+    if (!instanceId || !token) return res.status(400).json({ error: 'wapi_missing_config' })
+
+    const base = String(baseUrl).replace(/\/$/, '')
+    const p = Number.isFinite(Number(page)) ? Number(page) : 1
+    const ps = Number.isFinite(Number(pageSize)) ? Math.max(1, Math.min(500, Number(pageSize))) : 100
+    const url = `${base}/v1/contacts/fetch-contacts?instanceId=${encodeURIComponent(instanceId)}&perPage=${encodeURIComponent(String(ps))}&page=${encodeURIComponent(String(p))}`
+    let chats = []
+    let lastError = null
+    try {
+      const r = await fetch(url, { headers: { 'Authorization': `Bearer ${token}`, ...(cfg?.client_token ? { 'Client-Token': cfg.client_token } : {}) } })
+      let js = null
+      let txt = ''
+      try { js = await r.json() } catch { try { txt = await r.text() } catch {} }
+      if (!r.ok) {
+        return res.status(502).json({ status: r.status, url, body: js || txt || null })
+      }
+      const arr = Array.isArray(js) ? js
+        : (Array.isArray(js?.contacts) ? js.contacts
+        : (Array.isArray(js?.data?.contacts) ? js.data.contacts
+        : (Array.isArray(js?.data) ? js.data
+        : (Array.isArray(js?.result) ? js.result
+        : (Array.isArray(js?.items) ? js.items : [])))))
+      chats = arr.map((c) => ({
+        id: c?.id || c?.phone || c?.number || c?.waId || c?.chatId || c?.remoteJid || c?.jid || null,
+        name: c?.name || c?.pushName || c?.displayName || c?.username || c?.contactName || null,
+        phone: normalizePhoneDigits(c?.phone || c?.number || c?.waId || c?.id || c?.chatId || c?.remoteJid || c?.jid || ''),
+      })).filter((x) => x.phone)
+    } catch (e) {
+      lastError = e
+    }
+    if (!Array.isArray(chats)) chats = []
+
+    let imported = 0
+    if (importLeads && Array.isArray(chats)) {
+      for (const c of chats) {
+        const phoneDigits = normalizePhoneDigits(c.phone || c.id || '')
+        if (!phoneDigits) continue
+        const { data: existing } = await supabaseAdmin
+          .from('leads')
+          .select('id')
+          .eq('organization_id', organization_id)
+          .ilike('phone', `%${phoneDigits.slice(-8)}%`)
+          .limit(1)
+        if (existing && existing.length > 0) continue
+        const ownerUserId = await pickOrgOwnerUserId(organization_id)
+        if (!ownerUserId) continue
+        await supabaseAdmin
+          .from('leads')
+          .insert([{ 
+            name: c.name || `Contato ${phoneDigits.slice(-4)}`,
+            company: '—',
+            phone: phoneDigits,
+            email: null,
+            value: 0,
+            status: 'new',
+            responsible: 'Import',
+            source: 'whatsapp',
+            tags: ['wapi-import'],
+            notes: null,
+            user_id: ownerUserId,
+            organization_id,
+          }])
+        imported++
+      }
+    }
+
+    if (!chats.length && lastError) return res.status(502).json({ error: String(lastError?.message || lastError), url })
+    return res.json({ chats, imported })
+  } catch (e) {
+    console.error('[wapi] sync contacts error', e)
+    return res.sendStatus(500)
+  }
+})
+
 // Envio de mensagem WhatsApp para um lead (usa credenciais do owner do lead)
 app.post('/api/messages/whatsapp', async (req, res) => {
   try {
@@ -1880,6 +2087,69 @@ app.post('/api/messages/whatsapp', async (req, res) => {
   }
 })
 
+// Envio de mídia WhatsApp (não-oficial via W-API) para um lead
+app.post('/api/messages/whatsapp/media', async (req, res) => {
+  try {
+    const { leadId, media } = req.body || {}
+    if (!leadId || !media) return res.status(400).json({ error: 'leadId e media são obrigatórios' })
+
+    const { data: lead, error: leadErr } = await supabaseAdmin
+      .from('leads')
+      .select('*')
+      .eq('id', leadId)
+      .single()
+    if (leadErr || !lead) return res.status(404).json({ error: 'Lead não encontrado' })
+
+    const to = String(lead.phone || '').replace(/\D/g, '')
+
+    // Buscar config (prioriza usuário, fallback org)
+    const { data: non } = await supabaseAdmin
+      .from('settings')
+      .select('value')
+      .eq('user_id', lead.user_id)
+      .eq('key', 'whatsapp_nonofficial')
+      .maybeSingle()
+    let orgCfg = null
+    try {
+      const { data: cfg } = await supabaseAdmin
+        .from('organization_settings')
+        .select('value')
+        .eq('organization_id', lead.organization_id)
+        .eq('key', 'whatsapp_nonofficial')
+        .maybeSingle()
+      orgCfg = cfg || null
+    } catch {}
+
+    const cfg = non?.value || orgCfg?.value || null
+    if (!cfg || (cfg.provider || 'wapi') !== 'wapi') {
+      return res.status(400).json({ error: 'Envio de mídia requer W-API configurado' })
+    }
+
+    try {
+      const externalId = await sendWhatsAppNonOfficialMedia(to, media, lead, cfg)
+      await supabaseAdmin.from('communications').insert([
+        {
+          lead_id: lead.id,
+          user_id: lead.user_id,
+          type: 'whatsapp',
+          direction: 'outbound',
+          subject: null,
+          content: media?.caption || (media?.url ? `[media] ${media.url}` : '[media]'),
+          status: 'sent',
+          external_id: externalId || null,
+          organization_id: lead.organization_id || null,
+        }
+      ])
+      return res.json({ ok: true, id: externalId || null })
+    } catch (e) {
+      return res.status(502).json({ error: String(e?.message || e || 'send_failed') })
+    }
+  } catch (e) {
+    console.error('[whatsapp/media] send exception', e)
+    return res.sendStatus(500)
+  }
+})
+
 // Webhook UltraMsg (não requer verificação de assinatura)
 app.post('/webhooks/ultramsg', async (req, res) => {
   try {
@@ -1942,7 +2212,6 @@ app.post('/webhooks/ultramsg', async (req, res) => {
       if (existing && existing.length > 0) return res.sendStatus(200)
     }
     await supabaseAdmin.from('communications').insert([insertPayload])
-    queuePreQualification({ orgId: insertPayload.organization_id || null, phone: from, text, leadId: insertPayload.lead_id || null })
     return res.sendStatus(200)
   } catch (e) {
     console.error('[ultramsg] inbound error', e)
@@ -2008,7 +2277,6 @@ app.post('/webhooks/greenapi', async (req, res) => {
       if (existing && existing.length > 0) return res.sendStatus(200)
     }
     await supabaseAdmin.from('communications').insert([insertPayload])
-    queuePreQualification({ orgId: insertPayload.organization_id || null, phone: from, text, leadId: insertPayload.lead_id || null })
     return res.sendStatus(200)
   } catch (e) {
     console.error('[greenapi] inbound error', e)
@@ -2019,6 +2287,7 @@ app.post('/webhooks/greenapi', async (req, res) => {
 // Webhook W-API
 app.post('/webhooks/wapi', async (req, res) => {
   try {
+    if (!verifyWapiSignature(req)) return res.sendStatus(403)
     const body = parseJsonBody(req)
     const data = body || {}
     // Estruturas comuns: { message: { from, body, id } } ou { from, message, id }
@@ -2076,12 +2345,90 @@ app.post('/webhooks/wapi', async (req, res) => {
       if (existing && existing.length > 0) return res.sendStatus(200)
     }
     await supabaseAdmin.from('communications').insert([insertPayload])
-    queuePreQualification({ orgId: insertPayload.organization_id || null, phone: from, text, leadId: insertPayload.lead_id || null })
     return res.sendStatus(200)
   } catch (e) {
     console.error('[wapi] inbound error', e)
     return res.sendStatus(200)
   }
+})
+
+// W-API: Received webhook (mensagens recebidas)
+app.post('/webhooks/wapi/received', async (req, res) => {
+  try {
+    if (!verifyWapiSignature(req)) return res.sendStatus(403)
+    // Reutiliza lógica do handler unificado
+    return app._router.handle({ ...req, url: '/webhooks/wapi', method: 'POST' }, res, () => {})
+  } catch (e) {
+    console.error('[wapi/received] error', e)
+    return res.sendStatus(200)
+  }
+})
+
+// W-API: Delivery webhook (entrega enviada)
+app.post('/webhooks/wapi/delivery', async (req, res) => {
+  try {
+    if (!verifyWapiSignature(req)) return res.sendStatus(403)
+    const data = parseJsonBody(req) || {}
+    const externalId = data?.messageId || data?.id || data?.data?.id || null
+    if (!externalId) return res.status(200).json({ ok: true })
+    await supabaseAdmin
+      .from('communications')
+      .update({ status: 'delivered' })
+      .eq('external_id', externalId)
+      .eq('type', 'whatsapp')
+    return res.sendStatus(200)
+  } catch (e) {
+    console.error('[wapi/delivery] error', e)
+    return res.sendStatus(200)
+  }
+})
+
+// W-API: Message status webhook (sent/delivered/read/failed)
+app.post('/webhooks/wapi/message-status', async (req, res) => {
+  try {
+    if (!verifyWapiSignature(req)) return res.sendStatus(403)
+    const data = parseJsonBody(req) || {}
+    const externalId = data?.messageId || data?.id || data?.data?.id || null
+    const statusRaw = data?.status || data?.messageStatus || data?.data?.status || data?.event || ''
+    function mapStatus(s) {
+      const v = String(s || '').toLowerCase()
+      if (v.includes('read')) return 'read'
+      if (v.includes('deliver')) return 'delivered'
+      if (v.includes('sent')) return 'sent'
+      if (v.includes('fail') || v.includes('error') || v.includes('undeliver')) return 'failed'
+      return null
+    }
+    const mapped = mapStatus(statusRaw)
+    if (!externalId || !mapped) return res.status(200).json({ ok: true })
+    await supabaseAdmin
+      .from('communications')
+      .update({ status: mapped })
+      .eq('external_id', externalId)
+      .eq('type', 'whatsapp')
+    return res.sendStatus(200)
+  } catch (e) {
+    console.error('[wapi/message-status] error', e)
+    return res.sendStatus(200)
+  }
+})
+
+// W-API: Chat presence webhook (typing/online etc) — ignoramos por ora
+app.post('/webhooks/wapi/chat-presence', async (_req, res) => {
+  try {
+    // opcional: validar assinatura/token
+    if (!verifyWapiSignature(_req)) return res.sendStatus(403)
+    return res.sendStatus(200)
+  } catch {
+    return res.sendStatus(200)
+  }
+})
+
+// W-API: Connected/Disconnected webhooks — apenas logam/ack
+app.post('/webhooks/wapi/connected', async (_req, res) => {
+  try { if (!verifyWapiSignature(_req)) return res.sendStatus(403); return res.sendStatus(200) } catch { return res.sendStatus(200) }
+})
+app.post('/webhooks/wapi/disconnected', async (_req, res) => {
+  try { if (!verifyWapiSignature(_req)) return res.sendStatus(403); return res.sendStatus(200) } catch { return res.sendStatus(200) }
 })
 
 // Webhook Z-API
@@ -2199,7 +2546,6 @@ app.post('/webhooks/zapi', async (req, res) => {
       if (existing && existing.length > 0) return res.sendStatus(200)
     }
     await supabaseAdmin.from('communications').insert([insertPayload])
-    queuePreQualification({ orgId: insertPayload.organization_id || null, phone: from, text, leadId: insertPayload.lead_id || null })
     return res.sendStatus(200)
   } catch (e) {
     console.error('[zapi] inbound error', e)
