@@ -26,19 +26,22 @@ export function SettingsView() {
   const [publicBaseUrl, setPublicBaseUrl] = useState('')
   const [waConnected, setWaConnected] = useState<boolean | null>(null)
   // Não-oficial
-  const [waProvider, setWaProvider] = useState<'wapi' | 'zapi' | ''>('wapi')
+  const [waProvider, setWaProvider] = useState<'wapi' | 'zapi' | 'wppconnect' | ''>('wapi')
   const [waInstance, setWaInstance] = useState('')
   const [waToken, setWaToken] = useState('')
   const [waBaseUrl, setWaBaseUrl] = useState('')
   // Organização (não-oficial)
   const [orgWaConnected, setOrgWaConnected] = useState<boolean | null>(null)
-  const [orgWaProvider, setOrgWaProvider] = useState<'wapi' | 'zapi' | ''>('wapi')
+  const [orgWaProvider, setOrgWaProvider] = useState<'wapi' | 'zapi' | 'wppconnect' | ''>('wapi')
   const [orgWaInstance, setOrgWaInstance] = useState('')
   const [orgWaToken, setOrgWaToken] = useState('')
   const [orgWaBaseUrl, setOrgWaBaseUrl] = useState('')
   const [orgWaClientToken, setOrgWaClientToken] = useState('')
   const [openUserWaModal, setOpenUserWaModal] = useState(false)
   const [openOrgWaModal, setOpenOrgWaModal] = useState(false)
+  // Autentique (por organização)
+  const [autConnected, setAutConnected] = useState<boolean | null>(null)
+  const [autToken, setAutToken] = useState('')
 
   // (IA removida)
 
@@ -95,6 +98,14 @@ export function SettingsView() {
     const loadOrg = async () => {
       if (!orgId) return
       try {
+        // Autentique: status de conexão
+        const rAut = await apiFetch(`/api/org/autentique/config?organization_id=${encodeURIComponent(orgId)}`, { headers: { ...authHeader } })
+        if (rAut.ok) {
+          const js = await rAut.json()
+          setAutConnected(Boolean(js?.connected))
+        } else {
+          setAutConnected(false)
+        }
         const r = await apiFetch(`/api/org/whatsapp/nonofficial/config?organization_id=${encodeURIComponent(orgId)}`, { headers: { ...authHeader } })
         if (r.ok) {
           const js = await r.json()
@@ -257,6 +268,26 @@ export function SettingsView() {
     }
   }
 
+  const handleSaveAutentique = async () => {
+    if (!orgId || !autToken) return
+    setLoading(true)
+    try {
+      const r = await apiFetch('/api/org/autentique/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeader },
+        body: JSON.stringify({ organization_id: orgId, token: autToken })
+      })
+      if (!r.ok) throw new Error('Falha ao salvar token do Autentique')
+      setAutConnected(true)
+      setAutToken('')
+      toast({ title: 'Autentique conectado', description: 'Token salvo para a organização.' })
+    } catch (e: any) {
+      toast({ title: 'Erro', description: e?.message || 'Falha ao salvar token', variant: 'destructive' })
+    } finally {
+      setLoading(false)
+    }
+  }
+
   // (IA removida)
 
   return (
@@ -267,6 +298,34 @@ export function SettingsView() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <Card>
+          <CardHeader>
+            <CardTitle>Autentique (Contratos)</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="rounded-lg border border-border bg-card p-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-sm font-medium">Status</div>
+                  <div className="text-xs text-muted-foreground">Token da organização para criação de contratos.</div>
+                </div>
+                <div className="text-xs">{autConnected ? 'Conectado' : 'Desconectado'}</div>
+              </div>
+              {(orgRole === 'admin' || orgRole === 'manager') && (
+                <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 mt-3 items-end">
+                  <div className="sm:col-span-3">
+                    <Label htmlFor="aut-token">Token do Autentique</Label>
+                    <Input id="aut-token" placeholder="Cole o token da API" value={autToken} onChange={(e) => setAutToken(e.target.value)} />
+                  </div>
+                  <div className="sm:col-span-1 flex gap-2">
+                    <Button onClick={handleSaveAutentique} disabled={loading || !orgId || !autToken}>Salvar</Button>
+                  </div>
+                </div>
+              )}
+              <div className="mt-2 text-[11px] text-muted-foreground">Somente admin/manager pode salvar o token. Os membros da organização poderão criar contratos usando esse token.</div>
+            </div>
+          </CardContent>
+        </Card>
         <Card>
           <CardHeader>
             <CardTitle>WhatsApp Business</CardTitle>

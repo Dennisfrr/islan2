@@ -1,0 +1,51 @@
+{
+  "name": "kora-agent",
+  "version": "1.0.0",
+  "description": "Agente conversacional consultivo (Leo Consultor) com integração WhatsApp e dashboard de insights sobre leads.",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js",
+    "dashboard": "node server.js",
+    "dev": "nodemon index.js",
+    "dashboard-dev": "nodemon server.js",
+    "dashboard-worker": "node dashboard-worker.js",
+    "dashboard-worker-dev": "nodemon dashboard-worker.js",
+    "populate:schemas": "node -e \"(async()=>{const {popularEsquemasIniciais}=require('./index');await popularEsquemasIniciais();process.exit(0)})();\"",
+    "populate:social": "node -e \"(async()=>{const {popularSocialProofData}=require('./index');await popularSocialProofData();process.exit(0)})();\"",
+    "populate:all": "npm run populate:schemas && npm run populate:social"
+  },
+  "keywords": [
+    "whatsapp",
+    "chatbot",
+    "neo4j",
+    "gemini",
+    "lead-qualification",
+    "dashboard"
+  ],
+  "author": "ThoneX",
+  "license": "MIT",
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "@wppconnect-team/wppconnect": "^1.9.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.19.2",
+    "neo4j-driver": "^5.15.0",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Dennisfrr/doc.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Dennisfrr/doc/issues"
+  },
+  "homepage": "https://github.com/Dennisfrr/doc#readme"
+}

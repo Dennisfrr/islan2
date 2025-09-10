@@ -8,7 +8,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { useDeals } from '@/hooks/useDeals'
 import { useLeads } from '@/hooks/useLeads'
 import { Badge } from '@/components/ui/badge'
-import { Loader2, Plus, Trash2, Share2, FileText, Mail, Printer, Link as LinkIcon, CheckCircle2, XCircle, AlertTriangle } from 'lucide-react'
+import { Loader2, Plus, Trash2, Share2, FileText, Mail, Printer, Link as LinkIcon, CheckCircle2, XCircle, AlertTriangle, FileSignature } from 'lucide-react'
 import { DealEditor } from './DealEditor'
 import { EmailSendForm as DealsEmailSendForm } from './DealsEmailSendForm'
 
@@ -21,6 +21,7 @@ export function DealsManager() {
   const [modalOpen, setModalOpen] = useState(false)
   const [editorDealId, setEditorDealId] = useState<string | null>(null)
   const [emailOpen, setEmailOpen] = useState<string | null>(null)
+  const [busyAutentique, setBusyAutentique] = useState<string | null>(null)
 
   const filtered = useMemo(() => {
     return deals.filter(d => {
@@ -160,6 +161,41 @@ export function DealsManager() {
                   </Select>
                   <Button size="sm" variant="outline" onClick={() => copyPublicLink(d.id)}><LinkIcon className="h-4 w-4 mr-2" />Copiar link</Button>
                   <Button size="sm" variant="outline" onClick={() => setEmailOpen(d.id)}><Mail className="h-4 w-4 mr-2" />Enviar email</Button>
+                  <Button size="sm" variant="outline" onClick={async () => {
+                    try {
+                      setBusyAutentique(d.id)
+                      // Buscar lead para obter email/nome
+                      const lead = d.lead_id ? await fetch(`${import.meta.env.VITE_SUPABASE_URL}/rest/v1/leads?id=eq.${d.lead_id}&select=*`, {
+                        headers: { apikey: import.meta.env.VITE_SUPABASE_ANON_KEY as string, Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY as string}` }
+                      }).then(r => r.json()).then(arr => arr?.[0]) : null
+                      const signers = [] as any[]
+                      if (lead?.email) {
+                        signers.push({ email: lead.email, name: lead.name, action: 'SIGN' })
+                      } else {
+                        const email = prompt('Email do signatário (cliente) para Autentique:')
+                        if (!email) { setBusyAutentique(null); return }
+                        signers.push({ email, name: lead?.name || 'Cliente', action: 'SIGN' })
+                      }
+                      const token = localStorage.getItem('sb-access-token')
+                      const r = await fetch(`${import.meta.env.VITE_API_BASE_URL || ''}/api/autentique/contracts`, {
+                        method: 'POST',
+                        headers: {
+                          'Content-Type': 'application/json',
+                          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                        },
+                        body: JSON.stringify({ dealId: d.id, name: d.title, message: 'Contrato enviado via CRM', signers })
+                      })
+                      if (!r.ok) throw new Error(await r.text())
+                      const js = await r.json()
+                      alert(`Contrato criado: ${js?.document?.name || ''}`)
+                    } catch (e) {
+                      alert('Falha ao criar contrato no Autentique')
+                    } finally {
+                      setBusyAutentique(null)
+                    }
+                  }} disabled={busyAutentique === d.id}>
+                    {busyAutentique === d.id ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <FileSignature className="h-4 w-4 mr-2" />}Contrato (Autentique)
+                  </Button>
                   <Button size="sm" variant="outline" onClick={() => window.open(`/preview/deal/${d.id}`, '_blank')}><Printer className="h-4 w-4 mr-2" />Imprimir</Button>
                   <Button size="sm" variant="ghost" className="text-destructive ml-auto" onClick={() => deleteDeal(d.id)}>
                     <Trash2 className="h-4 w-4 mr-2" /> Excluir

@@ -26,6 +26,9 @@ import { LeadTimeline } from "@/components/crm/LeadTimeline"
 import { DealsManager } from "@/components/crm/DealsManager"
 // Settings removida
 import { QuickChat } from "@/components/crm/WhatsApp/QuickChat"
+import { useActivities } from "@/hooks/useActivities"
+import { useDeals } from "@/hooks/useDeals"
+import { parseAndExecute } from "@/agents/crm/gemini"
 
 const defaultPipelineStages = [
   { id: "new", name: "Novos Leads", color: "bg-blue-500", count: 0 },
@@ -63,6 +66,10 @@ export default function KommoCRM() {
   const [isEditModalOpen, setIsEditModalOpen] = useState(false)
   const [isDetailsModalOpen, setIsDetailsModalOpen] = useState(false)
   const { toast } = useToast()
+  const { createActivity, updateActivity, deleteActivity } = useActivities()
+  const { createDeal, updateDeal, deleteDeal } = useDeals()
+  const [agentModalOpen, setAgentModalOpen] = useState(false)
+  const [agentPrompt, setAgentPrompt] = useState('')
   // Carregar labels do pipeline (persistidos no backend)
   useEffect(() => {
     const load = async () => {
@@ -266,6 +273,250 @@ export default function KommoCRM() {
       })
     }
   }
+
+  // Intents do CRM (expostas para um agente externo)
+  useEffect(() => {
+    const agent = {
+      async moveLead(params: any) {
+        const leadId = String(params?.leadId || params?.id || '')
+        const toStageId = String(params?.toStageId || params?.status || '')
+        if (!leadId || !toStageId) return { ok: false, error: 'invalid_params' }
+        handleUpdateLeadStatus(leadId, toStageId)
+        return { ok: true }
+      },
+      openQuickChat(params: any) {
+        const leadId = String(params?.leadId || params?.id || '')
+        if (!leadId) return { ok: false, error: 'invalid_params' }
+        setSelectedChatLeadId(leadId)
+        setIsQuickChatOpen(true)
+        return { ok: true }
+      },
+      openWhatsAppView(params: any) {
+        const leadId = params?.leadId ? String(params.leadId) : null
+        if (leadId) setSelectedChatLeadId(leadId)
+        setSelectedView('whatsapp')
+        return { ok: true }
+      },
+      async createLead(params: any) {
+        try {
+          const payload = {
+            name: String(params?.name || 'Lead'),
+            company: String(params?.company || '—'),
+            value: Number(params?.value || 0),
+            status: String(params?.status || 'new') as any,
+            responsible: String(params?.responsible || (user?.user_metadata?.full_name || '—')),
+            source: String(params?.source || 'agent'),
+            tags: Array.isArray(params?.tags) ? params.tags : [],
+            email: params?.email || null,
+            phone: params?.phone || null,
+            notes: params?.notes || null,
+            last_contact: new Date().toISOString(),
+          } as any
+          await new Promise<void>((resolve, reject) => {
+            createLead(payload, { onSuccess: () => resolve(), onError: (e: any) => reject(e) })
+          })
+          return { ok: true }
+        } catch (e: any) {
+          return { ok: false, error: String(e?.message || e) }
+        }
+      },
+      async updateLead(params: any) {
+        try {
+          const leadId = String(params?.id || params?.leadId || '')
+          const existing = leads.find(l => l.id === leadId)
+          if (!existing) return { ok: false, error: 'lead_not_found' }
+          const updated = { ...existing, ...params }
+          await new Promise<void>((resolve, reject) => {
+            updateLead(updated, { onSuccess: () => resolve(), onError: (e: any) => reject(e) })
+          })
+          return { ok: true }
+        } catch (e: any) {
+          return { ok: false, error: String(e?.message || e) }
+        }
+      },
+      async deleteLead(params: any) {
+        const leadId = String(params?.leadId || params?.id || '')
+        if (!leadId) return { ok: false, error: 'invalid_params' }
+        return new Promise((resolve) => {
+          deleteLead(leadId, {
+            onSuccess: () => resolve({ ok: true }),
+            onError: (e: any) => resolve({ ok: false, error: String(e?.message || e) }),
+          })
+        })
+      },
+      setFilter(params: any) {
+        if (typeof params?.search === 'string') setSearchTerm(params.search)
+        if (typeof params?.status === 'string') setFilterStatus(params.status)
+        if (typeof params?.responsible === 'string') setFilterResponsible(params.responsible)
+        if (typeof params?.source === 'string') setFilterSource(params.source)
+        if (params?.minValue != null) setMinValue(String(params.minValue))
+        if (params?.maxValue != null) setMaxValue(String(params.maxValue))
+        return { ok: true }
+      },
+      setView(params: any) {
+        const v = String(params?.view || '')
+        if (!v) return { ok: false, error: 'invalid_params' }
+        setSelectedView(v)
+        return { ok: true }
+      },
+      selectLead(params: any) {
+        const leadId = String(params?.leadId || params?.id || '')
+        const openDetails = Boolean(params?.openDetails)
+        if (!leadId) return { ok: false, error: 'invalid_params' }
+        const lead = leads.find(l => l.id === leadId)
+        if (!lead) return { ok: false, error: 'lead_not_found' }
+        setSelectedLead(lead)
+        if (openDetails) setIsDetailsModalOpen(true)
+        return { ok: true }
+      },
+      async bulkCreateInStage(params: any) {
+        const status = String(params?.status || 'new')
+        const items = Array.isArray(params?.items) ? params.items : []
+        let created = 0
+        for (const it of items) {
+          try {
+            const payload = {
+              name: String(it?.name || 'Lead'),
+              company: String(it?.company || '—'),
+              value: Number(it?.value || 0),
+              status: status as any,
+              responsible: String(it?.responsible || (user?.user_metadata?.full_name || '—')),
+              source: String(it?.source || 'bulk-agent'),
+              tags: Array.isArray(it?.tags) ? it.tags : [],
+              email: it?.email || null,
+              phone: it?.phone || null,
+            } as any
+            // eslint-disable-next-line no-await-in-loop
+            await new Promise<void>((resolve, reject) => {
+              createLead(payload, { onSuccess: () => resolve(), onError: (e: any) => reject(e) })
+            })
+            created++
+          } catch {}
+        }
+        return { ok: true, created }
+      },
+      editStagesOpen() {
+        setIsEditStagesOpen(true)
+        return { ok: true }
+      },
+      getState() {
+        return {
+          selectedView,
+          filters: { searchTerm, filterStatus, filterResponsible, filterSource, minValue, maxValue },
+          stages: pipelineStages,
+          leadsCount: leads.length,
+        }
+      },
+      async dispatchIntent(name: string, payload: any) {
+        const n = String(name || '').toLowerCase()
+        const map: Record<string, any> = {
+          'move_lead': this.moveLead,
+          'open_quick_chat': this.openQuickChat,
+          'open_whatsapp_view': this.openWhatsAppView,
+          'create_lead': this.createLead,
+          'update_lead': this.updateLead,
+          'delete_lead': this.deleteLead,
+          'set_filter': this.setFilter,
+          'set_view': this.setView,
+          'select_lead': this.selectLead,
+          'bulk_create_in_stage': this.bulkCreateInStage,
+          'edit_stages_open': this.editStagesOpen,
+          'get_state': this.getState,
+          // Atividades / Notas / Tarefas
+          'create_note': async (p: any) => {
+            const leadId = String(p?.leadId || p?.id || '')
+            const title = String(p?.title || 'Nota')
+            const description = p?.description ? String(p.description) : undefined
+            if (!leadId) return { ok: false, error: 'invalid_params' }
+            await new Promise<void>((resolve, reject) => {
+              createActivity({ lead_id: leadId, type: 'note', title, description, completed: false } as any, { onSuccess: () => resolve(), onError: (e: any) => reject(e) })
+            })
+            return { ok: true }
+          },
+          'create_task': async (p: any) => {
+            const leadId = String(p?.leadId || p?.id || '')
+            const title = String(p?.title || 'Tarefa')
+            const description = p?.description ? String(p.description) : undefined
+            const due_date = p?.due_date ? String(p.due_date) : undefined
+            if (!leadId) return { ok: false, error: 'invalid_params' }
+            await new Promise<void>((resolve, reject) => {
+              createActivity({ lead_id: leadId, type: 'task', title, description, due_date, completed: false } as any, { onSuccess: () => resolve(), onError: (e: any) => reject(e) })
+            })
+            return { ok: true }
+          },
+          'update_activity': async (p: any) => {
+            const id = String(p?.id || '')
+            if (!id) return { ok: false, error: 'invalid_params' }
+            await new Promise<void>((resolve, reject) => {
+              updateActivity({ ...p, id } as any, { onSuccess: () => resolve(), onError: (e: any) => reject(e) })
+            })
+            return { ok: true }
+          },
+          'delete_activity': async (p: any) => {
+            const id = String(p?.id || '')
+            if (!id) return { ok: false, error: 'invalid_params' }
+            await new Promise<void>((resolve, reject) => {
+              deleteActivity(id, { onSuccess: () => resolve(), onError: (e: any) => reject(e) })
+            })
+            return { ok: true }
+          },
+          'open_activities': () => { setSelectedView('activities'); return { ok: true } },
+          'open_tasks': () => { setSelectedView('tasks'); return { ok: true } },
+          // Deals / Propostas
+          'open_deals': () => { setSelectedView('deals'); return { ok: true } },
+          'create_deal': async (p: any) => {
+            const payload: any = {
+              lead_id: p?.leadId || p?.lead_id || null,
+              title: String(p?.title || 'Proposta'),
+              description: p?.description ?? null,
+              status: (p?.status || 'draft'),
+              valid_until: p?.valid_until ?? null,
+              items: Array.isArray(p?.items) ? p.items : [],
+            }
+            await new Promise<void>((resolve, reject) => {
+              createDeal(payload, { onSuccess: () => resolve(), onError: (e: any) => reject(e) })
+            })
+            return { ok: true }
+          },
+          'update_deal': async (p: any) => {
+            const id = String(p?.id || '')
+            if (!id) return { ok: false, error: 'invalid_params' }
+            await new Promise<void>((resolve, reject) => {
+              updateDeal({ ...p, id } as any, { onSuccess: () => resolve(), onError: (e: any) => reject(e) })
+            })
+            return { ok: true }
+          },
+          'delete_deal': async (p: any) => {
+            const id = String(p?.id || '')
+            if (!id) return { ok: false, error: 'invalid_params' }
+            await new Promise<void>((resolve, reject) => {
+              deleteDeal(id, { onSuccess: () => resolve(), onError: (e: any) => reject(e) })
+            })
+            return { ok: true }
+          },
+        }
+        const fn = map[n]
+        if (!fn) return { ok: false, error: 'unknown_intent' }
+        return await fn.call(this, payload)
+      },
+    }
+    ;(window as any).crmAgent = agent
+    const onMessage = async (ev: MessageEvent) => {
+      const d: any = ev?.data || null
+      if (!d || d.type !== 'crm_intent') return
+      try {
+        const result = await agent.dispatchIntent(d.name, d.payload)
+        ev?.source && (ev.source as any).postMessage && (ev.source as any).postMessage({ type: 'crm_intent_result', id: d.id || null, ok: true, result }, '*')
+      } catch (e: any) {
+        try { ev?.source && (ev.source as any).postMessage && (ev.source as any).postMessage({ type: 'crm_intent_result', id: d.id || null, ok: false, error: String(e?.message || e) }, '*') } catch {}
+      }
+    }
+    window.addEventListener('message', onMessage)
+    return () => {
+      if ((window as any).crmAgent === agent) delete (window as any).crmAgent
+      window.removeEventListener('message', onMessage)
+    }
+  }, [user?.user_metadata?.full_name, leads, pipelineStages, selectedView, searchTerm, filterStatus, filterResponsible, filterSource, minValue, maxValue, createLead, updateLead, deleteLead])
 
   if (error) {
     return (
@@ -648,18 +899,6 @@ export default function KommoCRM() {
                         setPendingCreateStatus(status)
                         setIsBulkCreateOpen(true)
                       }}
-                      onBulkCreateInStage={(status) => {
-                        if (role === 'sales') {
-                          toast({
-                            title: 'Permissão insuficiente',
-                            description: 'Somente Admin/Manager podem criar leads.',
-                            variant: 'destructive',
-                          })
-                          return
-                        }
-                        setPendingCreateStatus(status)
-                        setIsBulkCreateOpen(true)
-                      }}
                     />
                   )))}
                 </div>
@@ -934,6 +1173,33 @@ export default function KommoCRM() {
 
       {/* Quick WhatsApp Chat Modal */}
       <QuickChat leadId={selectedChatLeadId || undefined} open={isQuickChatOpen} onOpenChange={setIsQuickChatOpen} />
+
+      {/* Agent Command Modal */}
+      <Dialog open={agentModalOpen} onOpenChange={setAgentModalOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Agente (Gemini)</DialogTitle>
+            <DialogDescription>Digite um comando em linguagem natural. Ex.: "mova o lead João para Proposta"</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <Textarea value={agentPrompt} onChange={(e) => setAgentPrompt(e.target.value)} placeholder="Seu comando" rows={4} />
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setAgentModalOpen(false)}>Cancelar</Button>
+              <Button onClick={async () => {
+                if (!agentPrompt.trim()) return
+                try {
+                  await parseAndExecute(agentPrompt.trim())
+                  toast({ title: 'Ok', description: 'Ação executada.' })
+                  setAgentModalOpen(false)
+                  setAgentPrompt('')
+                } catch (e: any) {
+                  toast({ title: 'Erro', description: String(e?.message || e), variant: 'destructive' })
+                }
+              }}>Executar</Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* Lead Details Modal */}
       <Dialog open={isDetailsModalOpen} onOpenChange={setIsDetailsModalOpen}>

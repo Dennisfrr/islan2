@@ -1,0 +1,54 @@
+{
+  "VehicleProtectionQuoteOnboarding": {
+    "goal": "Conduzir o cliente desde a cotação até a adesão da proteção veicular.",
+    "steps": [
+      {
+        "name": "CollectVehicleAndProfileData",
+        "objective": "Coletar dados essenciais do veículo e do condutor.",
+        "guidance_for_llm": "Peça modelo/ano, cidade/CEP, uso, condutores. Mensagens curtas.",
+        "completion_rules": {
+          "requires_profile_fields": ["veiculo.modelo", "veiculo.ano"],
+          "any_of_profile_fields": ["veiculo.cidade", "veiculo.cep"]
+        }
+      },
+      {
+        "name": "ProvideQuoteAndOptions",
+        "objective": "Calcular e apresentar a cotação com opções.",
+        "guidance_for_llm": "Use calculate_vehicle_protection_quote e explique coberturas.",
+        "completion_rules": {
+          "profile_tags_contains": ["cotacao_calculada"],
+          "or_text_in_profile_summary": ["cotação calculada"]
+        }
+      },
+      {
+        "name": "ProposalAndDocs",
+        "objective": "Gerar proposta/adesão e orientar documentos.",
+        "guidance_for_llm": "Use generate_membership_proposal e liste documentos necessários.",
+        "completion_rules": {
+          "profile_tags_contains": ["proposta_gerada"],
+          "or_text_in_profile_summary": ["proposta gerada"]
+        }
+      },
+      {
+        "name": "ScheduleInspection",
+        "objective": "Agendar a vistoria do veículo.",
+        "guidance_for_llm": "Proponha datas e janelas; use schedule_vehicle_inspection.",
+        "completion_rules": {
+          "profile_tags_contains": ["vistoria_agendada"],
+          "or_text_in_profile_summary": ["vistoria agendada"]
+        }
+      },
+      {
+        "name": "FinalizeMembership",
+        "objective": "Confirmar ativação e próximos contatos.",
+        "guidance_for_llm": "Confirme adesão/ativação pós-vistoria; oriente canais e 2ª via.",
+        "completion_rules": {
+          "profile_tags_contains": ["adesao_concluida"],
+          "or_text_in_profile_summary": ["adesão concluída"]
+        }
+      }
+    ]
+  }
+}
+
+

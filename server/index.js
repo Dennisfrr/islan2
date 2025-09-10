@@ -4,6 +4,7 @@ import cors from 'cors'
 import morgan from 'morgan'
 import { createClient } from '@supabase/supabase-js'
 import crypto from 'crypto'
+import PDFDocument from 'pdfkit'
 
 const app = express()
 app.use(morgan('tiny'))
@@ -41,7 +42,93 @@ const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { autoRefreshToken: false, persistSession: false }
 })
 
-// Provedor de WhatsApp: 'meta' (oficial), 'wapi', 'ultramsg' ou 'greenapi'
+// Bridge: Agente WhatsApp -> CRM (intents diretas, autenticado por X-Agent-Key)
+app.post('/api/agent/dispatch', async (req, res) => {
+  try {
+    const agentKey = req.headers['x-agent-key'] || req.headers['X-Agent-Key']
+    if (!agentKey || String(agentKey) !== String(process.env.AGENT_API_KEY || '')) {
+      return res.status(401).json({ error: 'unauthorized' })
+    }
+    const { name, payload } = req.body || {}
+    const intent = String(name || '').toLowerCase()
+    const p = payload || {}
+
+    async function resolveLead({ lead_id, phone, organization_id }) {
+      if (lead_id) {
+        const { data } = await supabaseAdmin.from('leads').select('*').eq('id', lead_id).maybeSingle()
+        return data || null
+      }
+      const digits = String(phone || '').replace(/\D/g, '')
+      if (!digits) return null
+      const q = supabaseAdmin.from('leads').select('*').ilike('phone', `%${digits.slice(-8)}%`).limit(1)
+      const { data } = await q
+      return (data && data[0]) || null
+    }
+
+    if (intent === 'create_note' || intent === 'create_task') {
+      const lead = await resolveLead({ lead_id: p.leadId || p.lead_id, phone: p.phone, organization_id: p.organization_id })
+      if (!lead) return res.status(404).json({ error: 'lead_not_found' })
+      const orgId = lead.organization_id
+      const ownerUserId = lead.user_id || (await pickOrgOwnerUserId(orgId))
+      const type = intent === 'create_task' ? 'task' : 'note'
+      const title = String(p.title || (type === 'task' ? 'Tarefa' : 'Nota'))
+      const description = p.description ? String(p.description) : null
+      const due_date = p.due_date ? new Date(p.due_date).toISOString() : null
+      const { error } = await supabaseAdmin.from('activities').insert([{
+        lead_id: lead.id,
+        user_id: ownerUserId,
+        type,
+        title,
+        description,
+        due_date,
+        completed: false,
+        organization_id: orgId,
+      }])
+      if (error) return res.status(500).json({ error: error.message })
+      return res.json({ ok: true })
+    }
+
+    if (intent === 'update_lead') {
+      const lead = await resolveLead({ lead_id: p.id || p.leadId, phone: p.phone, organization_id: p.organization_id })
+      if (!lead) return res.status(404).json({ error: 'lead_not_found' })
+      const updates = { ...p }
+      delete updates.id; delete updates.leadId; delete updates.phone; delete updates.organization_id
+      const { error } = await supabaseAdmin.from('leads').update(updates).eq('id', lead.id)
+      if (error) return res.status(500).json({ error: error.message })
+      return res.json({ ok: true })
+    }
+
+    if (intent === 'create_lead') {
+      const orgId = p.organization_id || null
+      if (!orgId) return res.status(400).json({ error: 'organization_id_required' })
+      const ownerUserId = await pickOrgOwnerUserId(orgId)
+      if (!ownerUserId) return res.status(400).json({ error: 'org_owner_not_found' })
+      const insertPayload = {
+        name: String(p.name || 'Lead'),
+        company: String(p.company || '—'),
+        email: p.email || null,
+        phone: p.phone ? String(p.phone) : null,
+        value: Number(p.value || 0),
+        status: String(p.status || 'new'),
+        responsible: String(p.responsible || 'Agent'),
+        source: String(p.source || 'whatsapp-agent'),
+        tags: Array.isArray(p.tags) ? p.tags : [],
+        notes: p.notes || null,
+        user_id: ownerUserId,
+        organization_id: orgId,
+      }
+      const { error } = await supabaseAdmin.from('leads').insert([insertPayload])
+      if (error) return res.status(500).json({ error: error.message })
+      return res.json({ ok: true })
+    }
+
+    return res.status(400).json({ error: 'unknown_intent' })
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) })
+  }
+})
+
+// Provedor de WhatsApp: 'meta' (oficial), 'wapi', 'ultramsg', 'greenapi', 'zapi' ou 'wppconnect'
 const WHATSAPP_PROVIDER = (process.env.WHATSAPP_PROVIDER || 'wapi').toLowerCase()
 
 // (IA removida)
@@ -130,6 +217,28 @@ async function sendWhatsAppNonOfficial(to, body, lead, userCfg) {
     return (json && (json.id || json.messageId || json.data?.id || json?.messageId)) || null
   }
 
+  if (provider === 'wppconnect') {
+    const baseUrl = userCfg?.base_url || process.env.WPPCONNECT_BASE_URL
+    const session = userCfg?.session || userCfg?.session_id || userCfg?.instance_id || process.env.WPPCONNECT_SESSION
+    const token = userCfg?.token || userCfg?.api_key || process.env.WPPCONNECT_TOKEN
+    if (!baseUrl || !session || !token) throw new Error('WPPConnect não configurado')
+    const base = String(baseUrl).replace(/\/$/, '')
+    const url = `${base}/api/${encodeURIComponent(session)}/send-message`
+    const payload = { phone: to, message: body }
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(payload)
+    })
+    let json = null
+    try { json = await resp.json() } catch {}
+    if (!resp.ok || (json && (json.error || json.status === 'error'))) {
+      const msg = (json && (json.message || json.error)) || 'Falha ao enviar via WPPConnect'
+      throw new Error(msg)
+    }
+    return (json && (json.id || json.messageId || json?.message?.id || json?.data?.id)) || null
+  }
+
   if (provider === 'zapi') {
     const baseUrl = userCfg?.base_url || process.env.ZAPI_BASE_URL || 'https://api.z-api.io'
     const instanceId = userCfg?.instance_id || process.env.ZAPI_INSTANCE_ID
@@ -163,8 +272,59 @@ async function sendWhatsAppNonOfficial(to, body, lead, userCfg) {
 // Envio de mídia para provedores não-oficiais (W-API foco principal)
 async function sendWhatsAppNonOfficialMedia(to, media, lead, userCfg) {
   const provider = (userCfg?.provider || WHATSAPP_PROVIDER)
+  if (provider === 'wppconnect') {
+    const baseUrl = userCfg?.base_url || process.env.WPPCONNECT_BASE_URL
+    const session = userCfg?.session || userCfg?.session_id || userCfg?.instance_id || process.env.WPPCONNECT_SESSION
+    const token = userCfg?.token || userCfg?.api_key || process.env.WPPCONNECT_TOKEN
+    if (!baseUrl || !session || !token) throw new Error('WPPConnect não configurado')
+    const base = String(baseUrl).replace(/\/$/, '')
+
+    const type = String(media?.type || '').toLowerCase()
+    const url = String(media?.url || '')
+    const caption = media?.caption || null
+    const filename = media?.filename || null
+    if (!to || !type || !url) throw new Error('Parâmetros inválidos: to, type e url são obrigatórios')
+
+    const candidates = []
+    if (type === 'image') {
+      candidates.push({ endpoint: `send-image`, payload: { phone: to, path: url, ...(caption ? { caption } : {}) } })
+    } else if (type === 'video') {
+      candidates.push({ endpoint: `send-file`, payload: { phone: to, path: url, ...(filename ? { filename } : {}), ...(caption ? { caption } : {}) } })
+    } else if (type === 'audio') {
+      candidates.push({ endpoint: `send-file`, payload: { phone: to, path: url, ...(filename ? { filename } : {}) } })
+    } else if (type === 'document' || type === 'file' || type === 'pdf') {
+      candidates.push({ endpoint: `send-file`, payload: { phone: to, path: url, ...(filename ? { filename } : {}), ...(caption ? { caption } : {}) } })
+    }
+    // Fallback
+    candidates.push({ endpoint: `send-file`, payload: { phone: to, path: url, ...(filename ? { filename } : {}), ...(caption ? { caption } : {}) } })
+
+    let lastError = null
+    for (const c of candidates) {
+      try {
+        const fullUrl = `${base}/api/${encodeURIComponent(session)}/${c.endpoint}`
+        const resp = await fetch(fullUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify(c.payload)
+        })
+        let json = null
+        try { json = await resp.json() } catch {}
+        if (!resp.ok || (json && (json.error || json.status === 'error'))) {
+          lastError = (json && (json.message || json.error)) || `HTTP ${resp.status}`
+          continue
+        }
+        const externalId = (json && (json.id || json.messageId || json?.message?.id || json?.data?.id)) || null
+        return externalId
+      } catch (e) {
+        lastError = e?.message || String(e)
+      }
+    }
+
+    throw new Error(lastError || 'Falha ao enviar mídia via WPPConnect')
+  }
+
   if (provider !== 'wapi') {
-    throw new Error('Envio de mídia suportado apenas para W-API neste endpoint')
+    throw new Error('Envio de mídia suportado apenas para W-API e WPPConnect neste endpoint')
   }
   const baseUrl = userCfg?.base_url || process.env.WAPI_BASE_URL
   const instanceId = userCfg?.instance_id || process.env.WAPI_INSTANCE_ID
@@ -1561,6 +1721,64 @@ app.get('/api/org/pipeline/config', async (req, res) => {
   }
 })
 
+// Configuração do Autentique por organização
+app.post('/api/org/autentique/config', async (req, res) => {
+  try {
+    const user = await getUserFromAuthHeader(req)
+    if (!user) return res.status(401).json({ error: 'unauthorized' })
+    const { organization_id, token } = req.body || {}
+    if (!organization_id) return res.status(400).json({ error: 'organization_id é obrigatório' })
+    if (!token) return res.status(400).json({ error: 'token é obrigatório' })
+
+    const { data: membership } = await supabaseAdmin
+      .from('organization_members')
+      .select('role')
+      .eq('user_id', user.id)
+      .eq('organization_id', organization_id)
+      .maybeSingle()
+    if (!membership || !['admin','manager'].includes(String(membership.role))) return res.status(403).json({ error: 'forbidden' })
+
+    const value = { token: String(token) }
+    const { error } = await supabaseAdmin
+      .from('organization_settings')
+      .upsert({ organization_id, key: 'autentique', value, updated_at: new Date().toISOString() }, { onConflict: 'organization_id,key' })
+    if (error) return res.status(500).json({ error: error.message })
+    return res.json({ ok: true })
+  } catch (e) {
+    console.error('[api/org/autentique/config] error', e)
+    return res.sendStatus(500)
+  }
+})
+
+app.get('/api/org/autentique/config', async (req, res) => {
+  try {
+    const user = await getUserFromAuthHeader(req)
+    if (!user) return res.status(401).json({ error: 'unauthorized' })
+    const organization_id = String(req.query.organization_id || '')
+    if (!organization_id) return res.status(400).json({ error: 'organization_id é obrigatório' })
+
+    const { data: membership } = await supabaseAdmin
+      .from('organization_members')
+      .select('role')
+      .eq('user_id', user.id)
+      .eq('organization_id', organization_id)
+      .maybeSingle()
+    if (!membership) return res.status(403).json({ error: 'forbidden' })
+
+    const { data } = await supabaseAdmin
+      .from('organization_settings')
+      .select('value')
+      .eq('organization_id', organization_id)
+      .eq('key', 'autentique')
+      .maybeSingle()
+    const has = Boolean(data?.value?.token || process.env.AUTENTIQUE_TOKEN)
+    return res.json({ connected: has })
+  } catch (e) {
+    console.error('[api/org/autentique/config:get] error', e)
+    return res.sendStatus(500)
+  }
+})
+
 // Salvar configuração do provedor não-oficial por usuário
 app.post('/api/whatsapp/nonofficial/config', async (req, res) => {
   try {
@@ -2352,6 +2570,72 @@ app.post('/webhooks/wapi', async (req, res) => {
   }
 })
 
+// Webhook WPPConnect
+app.post('/webhooks/wppconnect', async (req, res) => {
+  try {
+    const body = parseJsonBody(req)
+    const data = body || {}
+    const msg = data.message || data.data || data
+    const text = msg?.body || msg?.text || data?.text || ''
+    const fromRaw = msg?.from || data?.from || msg?.chatId || msg?.chat?.id || ''
+    const externalId = msg?.id || data?.id || msg?.messageId || null
+    const session = data?.session || data?.Session || data?.sessionId || null
+    if (!fromRaw || !text) return res.status(200).json({ ok: true })
+    const from = String(fromRaw).replace(/\D/g, '')
+
+    const { data: leads } = await supabaseAdmin
+      .from('leads')
+      .select('*')
+      .ilike('phone', `%${from.slice(-8)}%`)
+      .limit(1)
+    const lead = (leads || [])[0]
+
+    // Resolver org pelo session se necessário
+    let orgId = lead?.organization_id || null
+    if (!orgId && session) {
+      try {
+        const { data: orgCfg } = await supabaseAdmin
+          .from('organization_settings')
+          .select('organization_id')
+          .eq('key', 'whatsapp_nonofficial')
+          .filter('value->>provider', 'eq', 'wppconnect')
+          .or(`value->>session.eq.${String(session)},value->>session_id.eq.${String(session)},value->>instance_id.eq.${String(session)}`)
+          .maybeSingle()
+        orgId = orgCfg?.organization_id || null
+      } catch {}
+    }
+
+    const ownerUserId = orgId ? await pickOrgOwnerUserId(orgId) : null
+    if (!orgId) return res.sendStatus(200)
+
+    const insertPayload = {
+      lead_id: lead?.id || null,
+      user_id: lead?.user_id || ownerUserId,
+      type: 'whatsapp',
+      direction: 'inbound',
+      subject: null,
+      content: text,
+      status: 'read',
+      external_id: externalId,
+      organization_id: orgId,
+    }
+    if (externalId) {
+      const { data: existing } = await supabaseAdmin
+        .from('communications')
+        .select('id')
+        .eq('external_id', externalId)
+        .eq('type', 'whatsapp')
+        .limit(1)
+      if (existing && existing.length > 0) return res.sendStatus(200)
+    }
+    await supabaseAdmin.from('communications').insert([insertPayload])
+    return res.sendStatus(200)
+  } catch (e) {
+    console.error('[wppconnect] inbound error', e)
+    return res.sendStatus(200)
+  }
+})
+
 // W-API: Received webhook (mensagens recebidas)
 app.post('/webhooks/wapi/received', async (req, res) => {
   try {
@@ -2816,5 +3100,247 @@ app.get('/api/deals/:id', async (req, res) => {
   } catch (e) {
     console.error('[deals/:id] error', e)
     return res.sendStatus(500)
+  }
+})
+
+// ================================
+// AUTENTIQUE — criação de contrato
+// ================================
+// Requer variáveis de ambiente:
+// - AUTENTIQUE_TOKEN: Token de API (Bearer)
+// - AUTENTIQUE_API: Base GraphQL (default https://api.autentique.com.br/v2/graphql)
+// Fluxo:
+// 1) Gera PDF simples da proposta (título, itens e total)
+// 2) Envia via GraphQL multipart (operations/map) com mutation documentsCreate
+// Docs referenciais: API Autentique v2 GraphQL multipart upload
+
+function buildDealPdfBuffer(deal, items) {
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ size: 'A4', margin: 50 })
+      const chunks = []
+      doc.on('data', (c) => chunks.push(c))
+      doc.on('end', () => resolve(Buffer.concat(chunks)))
+
+      doc.fontSize(18).text(`Proposta: ${deal.title}`, { align: 'left' })
+      if (deal.description) {
+        doc.moveDown(0.5)
+        doc.fontSize(12).text(deal.description)
+      }
+      doc.moveDown(1)
+      doc.fontSize(12).text(`Status: ${deal.status}`)
+      if (deal.valid_until) doc.text(`Validade: ${new Date(deal.valid_until).toLocaleDateString('pt-BR')}`)
+      doc.moveDown(1)
+
+      // Tabela simples
+      doc.fontSize(12).text('Itens:', { underline: true })
+      doc.moveDown(0.5)
+      items.forEach((it) => {
+        doc.text(`${it.product_name}  x${it.quantity}  —  R$ ${Number(it.total_price).toLocaleString('pt-BR')}`)
+      })
+      doc.moveDown(1)
+      doc.fontSize(14).text(`Total: R$ ${Number(deal.total_value || 0).toLocaleString('pt-BR')}`, { align: 'right' })
+
+      doc.end()
+    } catch (e) {
+      reject(e)
+    }
+  })
+}
+
+async function fetchDealWithItems(dealId) {
+  const { data: deal, error: dErr } = await supabaseAdmin.from('deals').select('*').eq('id', dealId).single()
+  if (dErr || !deal) throw new Error('deal_not_found')
+  const { data: items, error: iErr } = await supabaseAdmin.from('deal_items').select('*').eq('deal_id', dealId).order('created_at', { ascending: true })
+  if (iErr) throw iErr
+  return { deal, items: items || [] }
+}
+
+function buildAutentiqueMultipart({ name, signers, message }, fileBuffer, filename) {
+  const query = `mutation($document: DocumentInput!, $signers: [SignerInput!]!, $file: Upload!) {\n  documentsCreate(document: $document, signers: $signers, file: $file) {\n    id\n    name\n    status\n    url\n  }\n}`
+  const operations = {
+    query,
+    variables: {
+      document: { name, message: message || null },
+      signers,
+      file: null,
+    },
+  }
+  const map = { '0': ['variables.file'] }
+  const boundary = '----autentiqueForm' + Math.random().toString(16).slice(2)
+  const CRLF = '\r\n'
+
+  const parts = []
+  function push(s) { parts.push(Buffer.isBuffer(s) ? s : Buffer.from(s)) }
+  push(`--${boundary}${CRLF}`)
+  push('Content-Disposition: form-data; name="operations"' + CRLF)
+  push('Content-Type: application/json' + CRLF + CRLF)
+  push(JSON.stringify(operations) + CRLF)
+
+  push(`--${boundary}${CRLF}`)
+  push('Content-Disposition: form-data; name="map"' + CRLF)
+  push('Content-Type: application/json' + CRLF + CRLF)
+  push(JSON.stringify(map) + CRLF)
+
+  push(`--${boundary}${CRLF}`)
+  push(`Content-Disposition: form-data; name="0"; filename="${filename}"` + CRLF)
+  push('Content-Type: application/pdf' + CRLF + CRLF)
+  push(fileBuffer)
+  push(CRLF)
+
+  push(`--${boundary}--${CRLF}`)
+  const body = Buffer.concat(parts)
+  return { body, boundary }
+}
+
+app.post('/api/autentique/contracts', async (req, res) => {
+  try {
+    const user = await getUserFromAuthHeader(req)
+    if (!user) return res.status(401).json({ error: 'unauthorized' })
+
+    const { dealId, name, message, signers } = req.body || {}
+    if (!dealId) return res.status(400).json({ error: 'dealId obrigatório' })
+    if (!Array.isArray(signers) || signers.length === 0) return res.status(400).json({ error: 'signers obrigatório' })
+
+    const { deal, items } = await fetchDealWithItems(dealId)
+    // Checa se o usuário pertence à organização do deal
+    if (deal.organization_id) {
+      const { data: membership } = await supabaseAdmin
+        .from('organization_members')
+        .select('user_id')
+        .eq('user_id', user.id)
+        .eq('organization_id', deal.organization_id)
+        .maybeSingle()
+      if (!membership) return res.status(403).json({ error: 'forbidden' })
+    }
+    const pdf = await buildDealPdfBuffer(deal, items)
+
+    // Token por organização (prioridade) ou fallback .env
+    let token = null
+    if (deal.organization_id) {
+      const { data: orgCfg } = await supabaseAdmin
+        .from('organization_settings')
+        .select('value')
+        .eq('organization_id', deal.organization_id)
+        .eq('key', 'autentique')
+        .maybeSingle()
+      token = orgCfg?.value?.token || null
+    }
+    token = token || process.env.AUTENTIQUE_TOKEN
+    const endpoint = process.env.AUTENTIQUE_API || 'https://api.autentique.com.br/v2/graphql'
+    if (!token) return res.status(500).json({ error: 'AUTENTIQUE_TOKEN ausente' })
+
+    // Normalizar signers no formato esperado: [{ email, action: SIGN, name? }]
+    const normalizedSigners = signers.map((s) => ({
+      email: s.email,
+      action: s.action || 'SIGN',
+      name: s.name || undefined,
+    }))
+
+    const multipart = buildAutentiqueMultipart({ name: name || deal.title, message, signers: normalizedSigners }, pdf, `${deal.title || 'contrato'}.pdf`)
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': `multipart/form-data; boundary=${multipart.boundary}`,
+      },
+      body: multipart.body,
+    })
+    const json = await resp.json().catch(() => null)
+    if (!resp.ok || (json && json.errors)) {
+      return res.status(502).json({ error: json?.errors?.[0]?.message || 'autentique_error' })
+    }
+
+    const data = json?.data?.documentsCreate
+
+    // Persistir contrato
+    try {
+      await supabaseAdmin
+        .from('contracts')
+        .insert([{
+          deal_id: deal.id,
+          organization_id: deal.organization_id,
+          user_id: user.id,
+          provider: 'autentique',
+          external_id: data?.id || null,
+          name: data?.name || (name || deal.title),
+          url: data?.url || null,
+          status: data?.status ? String(data.status).toLowerCase() : 'created',
+          metadata: data || null,
+        }])
+    } catch {}
+
+    return res.json({ ok: true, document: data })
+  } catch (e) {
+    console.error('[autentique/contracts] error', e)
+    return res.sendStatus(500)
+  }
+})
+
+// Webhook do Autentique — atualizar status do contrato
+app.post('/webhooks/autentique', async (req, res) => {
+  try {
+    // Autentique envia payloads com informações do documento; aqui aceitamos sem verificação de assinatura (pode ser adicionado via secret)
+    const data = parseJsonBody(req) || {}
+    const docId = data?.document?.id || data?.id || data?.document_id || null
+    const status = data?.document?.status || data?.status || null
+    if (!docId) return res.status(200).json({ ok: true })
+    const next = typeof status === 'string' ? String(status).toLowerCase() : null
+    await supabaseAdmin
+      .from('contracts')
+      .update({ status: next || 'pending', metadata: data, updated_at: new Date().toISOString() })
+      .eq('external_id', docId)
+      .eq('provider', 'autentique')
+    return res.sendStatus(200)
+  } catch (e) {
+    console.error('[webhooks/autentique] error', e)
+    return res.sendStatus(200)
+  }
+})
+
+// Gemini: parse intent a partir de linguagem natural
+app.post('/api/agent/parse-intent', async (req, res) => {
+  try {
+    const apiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY
+    if (!apiKey) return res.status(500).json({ error: 'missing_gemini_key' })
+    const { prompt, context } = req.body || {}
+    if (!prompt) return res.status(400).json({ error: 'prompt_required' })
+
+    // Compacta contexto mínimo
+    const minimal = {
+      view: context?.view || null,
+      filters: context?.filters || null,
+      stages: Array.isArray(context?.stages) ? context.stages.map((s) => ({ id: s.id, name: s.name })) : null,
+    }
+
+    const system = `Você é um parser de intenções de CRM. Responda APENAS JSON com {name: string, payload: object}. Intenções válidas:
+    move_lead{leadId,toStageId}, open_quick_chat{leadId}, open_whatsapp_view{leadId?}, create_lead{...}, update_lead{id,...}, delete_lead{id},
+    set_filter{...}, set_view{view}, select_lead{leadId,openDetails?}, create_note{leadId,title,description?}, create_task{leadId,title,description?,due_date?},
+    update_activity{id,...}, delete_activity{id}, open_activities{}, open_tasks{}, open_deals{}, create_deal{leadId?,title,description?,status?,valid_until?,items?}, update_deal{id,...}, delete_deal{id}.
+    Se faltar parâmetro essencial, use payload vazio e deixe para o cliente preencher.`
+
+    // Chamada simples via fetch REST (models: gemini-1.5-flash ou 2.0/2.5 endpoints futuros)
+    const model = process.env.GEMINI_MODEL || 'gemini-1.5-flash'
+    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [
+          { role: 'user', parts: [{ text: system }] },
+          { role: 'user', parts: [{ text: `Contexto: ${JSON.stringify(minimal)}` }] },
+          { role: 'user', parts: [{ text: `Prompt: ${String(prompt)}` }] }
+        ],
+        generationConfig: { temperature: 0.2, maxOutputTokens: 256 }
+      })
+    })
+    const json = await resp.json().catch(() => ({}))
+    if (!resp.ok) return res.status(502).json({ error: 'gemini_error', details: json })
+    const text = json?.candidates?.[0]?.content?.parts?.[0]?.text || ''
+    let parsed = null
+    try { parsed = JSON.parse(text) } catch { parsed = null }
+    if (!parsed || !parsed.name) return res.status(200).json({ name: 'get_state', payload: {} })
+    return res.json(parsed)
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) })
   }
 })

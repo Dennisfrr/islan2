@@ -142,6 +142,24 @@ CREATE TABLE public.communications (
 );
 
 -- ==========================================
+-- TABELA DE CONTRATOS/ASSINATURAS
+-- ==========================================
+CREATE TABLE IF NOT EXISTS public.contracts (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    deal_id UUID REFERENCES public.deals(id) ON DELETE CASCADE,
+    organization_id UUID REFERENCES public.organizations(id) NOT NULL,
+    user_id UUID REFERENCES auth.users NOT NULL,
+    provider TEXT NOT NULL DEFAULT 'autentique',
+    external_id TEXT, -- id do documento no provedor
+    name TEXT,
+    url TEXT,
+    status TEXT CHECK (status IN ('created','pending','sent','signed','canceled','failed')) DEFAULT 'created',
+    metadata JSONB,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- ==========================================
 -- TABELA DE CONFIGURAÇÕES
 -- ==========================================
 CREATE TABLE public.settings (
@@ -191,6 +209,7 @@ CREATE TRIGGER handle_updated_at_products BEFORE UPDATE ON public.products FOR E
 CREATE TRIGGER handle_updated_at_deals BEFORE UPDATE ON public.deals FOR EACH ROW EXECUTE PROCEDURE public.handle_updated_at();
 CREATE TRIGGER handle_updated_at_settings BEFORE UPDATE ON public.settings FOR EACH ROW EXECUTE PROCEDURE public.handle_updated_at();
 CREATE TRIGGER handle_updated_at_organization_settings BEFORE UPDATE ON public.organization_settings FOR EACH ROW EXECUTE PROCEDURE public.handle_updated_at();
+CREATE TRIGGER handle_updated_at_contracts BEFORE UPDATE ON public.contracts FOR EACH ROW EXECUTE PROCEDURE public.handle_updated_at();
 
 -- Preencher organization_id em leads automaticamente se não fornecido
 CREATE OR REPLACE FUNCTION public.set_default_org_on_leads()
@@ -228,6 +247,7 @@ ALTER TABLE public.settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.organizations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.organization_members ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.organization_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.contracts ENABLE ROW LEVEL SECURITY;
 
 -- Políticas RLS
 
@@ -352,6 +372,22 @@ CREATE POLICY "Admins/Managers can view org communications" ON public.communicat
 CREATE POLICY "Users can insert own communications" ON public.communications FOR INSERT WITH CHECK (auth.uid() = user_id);
 CREATE POLICY "Users can update own communications" ON public.communications FOR UPDATE USING (auth.uid() = user_id);
 CREATE POLICY "Users can delete own communications" ON public.communications FOR DELETE USING (auth.uid() = user_id);
+
+-- Contracts: visíveis para membros da organização; inserção/atualização pelo usuário criador/admin
+CREATE POLICY "Org members can view contracts" ON public.contracts FOR SELECT USING (
+  EXISTS (
+    SELECT 1 FROM public.organization_members m
+    WHERE m.user_id = auth.uid() AND m.organization_id = contracts.organization_id
+  )
+);
+CREATE POLICY "Users can insert own contracts" ON public.contracts FOR INSERT WITH CHECK (auth.uid() = user_id);
+CREATE POLICY "Users can update own contracts" ON public.contracts FOR UPDATE USING (auth.uid() = user_id);
+CREATE POLICY "Org admins can update org contracts" ON public.contracts FOR UPDATE USING (
+  EXISTS (
+    SELECT 1 FROM public.organization_members m
+    WHERE m.user_id = auth.uid() AND m.organization_id = contracts.organization_id AND m.role IN ('admin','manager')
+  )
+);
 
 -- Settings: usuários podem gerenciar apenas suas próprias configurações
 CREATE POLICY "Users can view own settings" ON public.settings FOR SELECT USING (auth.uid() = user_id);

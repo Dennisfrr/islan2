@@ -12,7 +12,7 @@ interface CRMSidebarProps {
   onToggleCollapse: () => void
 }
 
-export function CRMSidebar({ selectedView, onViewChange, collapsed }: CRMSidebarProps) {
+export function CRMSidebar({ selectedView, onViewChange, collapsed, onToggleCollapse }: CRMSidebarProps) {
   const { role, user } = useAuth()
   const menuItems = [
     { id: "dashboard", label: "Dashboard", icon: BarChart3 },
@@ -32,7 +32,7 @@ export function CRMSidebar({ selectedView, onViewChange, collapsed }: CRMSidebar
     <div className={`${collapsed ? 'w-16' : 'w-64'} bg-card border-r border-border flex flex-col transition-all duration-300 shadow-card`}>
       {/* Logo */}
       <div className="p-4 border-b border-border bg-gradient-primary">
-        <div className="flex items-center space-x-3">
+        <div className="flex items-center justify-between space-x-3">
           {collapsed ? (
             <span className="px-2 py-0.5 rounded-sm bg-amber-400 text-black text-sm font-extrabold tracking-wide">CRM</span>
           ) : (
@@ -41,6 +41,13 @@ export function CRMSidebar({ selectedView, onViewChange, collapsed }: CRMSidebar
               <span className="ml-2 px-2 py-0.5 rounded-sm bg-amber-400 text-black text-sm font-extrabold tracking-wide">CRM</span>
             </div>
           )}
+          <Button size="icon" variant="ghost" className="h-8 w-8 hover:bg-primary/20 text-primary-foreground" onClick={onToggleCollapse}>
+            {collapsed ? (
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4"><path d="M9.47 5.97a.75.75 0 0 1 1.06 0l4.5 4.5a.75.75 0 0 1 0 1.06l-4.5 4.5a.75.75 0 0 1-1.06-1.06L13.94 12 9.47 7.53a.75.75 0 0 1 0-1.06Z"/></svg>
+            ) : (
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4"><path d="M14.53 18.03a.75.75 0 0 1-1.06 0l-4.5-4.5a.75.75 0 0 1 0-1.06l4.5-4.5a.75.75 0 1 1 1.06 1.06L10.06 12l4.47 4.47a.75.75 0 0 1 0 1.06Z"/></svg>
+            )}
+          </Button>
         </div>
       </div>
 
