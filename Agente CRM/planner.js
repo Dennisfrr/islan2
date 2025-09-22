@@ -1,74 +1,9 @@
 // planner.js
-const DEFAULT_PLAN_NAME = "VehicleProtectionQuoteOnboarding";
+const DEFAULT_PLAN_NAME = "LeadQualificationToMeeting";
 const MAX_RETRIES_PER_STEP = 2; // Número máximo de tentativas para uma etapa antes de considerar uma falha
 
 // Definição dos planos disponíveis.
 const PLANS = {
-    "VehicleProtectionQuoteOnboarding": {
-        goal: "Conduzir o cliente desde a cotação até a adesão da proteção veicular (coleta de dados do veículo, cálculo, proposta, vistoria e ativação).",
-        steps: [
-            {
-                name: "CollectVehicleAndProfileData",
-                objective: "Coletar dados essenciais do veículo e do condutor (modelo, ano, placa/cidade, uso principal, CEP) e confirmar dados de cadastro.",
-                guidance_for_llm: "Apresente-se como atendente de proteção veicular. Faça perguntas objetivas para coletar: modelo/ano do veículo, cidade/CEP de circulação, uso (particular/app), principais condutores, e dados básicos do cliente. Mantenha mensagens curtas e claras. Se já houver dados no perfil, valide-os. Ao final, peça confirmação para calcular a cotação.",
-                completion_check: (profile) => !!(profile && profile.veiculo && profile.veiculo.modelo && profile.veiculo.ano && (profile.veiculo.cidade || profile.veiculo.cep)),
-            },
-            {
-                name: "ProvideQuoteAndOptions",
-                objective: "Calcular e apresentar a cotação com opções de cobertura e assistências.",
-                guidance_for_llm: "Use a ferramenta 'calculate_vehicle_protection_quote' com os dados coletados. Explique de forma simples o valor mensal, o que está incluso (coberturas/assistências) e opções (ex.: franquias, rastreador, carro reserva). Se o cliente pedir segunda via de boleto, direcione para o fluxo adequado mais à frente.",
-                completion_check: (profile) => profile && ((profile.tags && profile.tags.includes("cotacao_calculada")) || (profile.ultimoResumoDaSituacao && profile.ultimoResumoDaSituacao.toLowerCase().includes("cotação calculada")))
-            },
-            {
-                name: "ProposalAndDocs",
-                objective: "Gerar proposta/adesão e orientar sobre documentos necessários.",
-                guidance_for_llm: "Se o cliente gostar da cotação, use 'generate_membership_proposal'. Informe documentos necessários (CNH, CRLV, foto do veículo), forma de pagamento e próximos passos. Deixe claro que a proteção começa após vistoria/ativação, conforme política.",
-                completion_check: (profile) => profile && ((profile.tags && profile.tags.includes("proposta_gerada")) || (profile.ultimoResumoDaSituacao && profile.ultimoResumoDaSituacao.toLowerCase().includes("proposta gerada")))
-            },
-            {
-                name: "ScheduleInspection",
-                objective: "Agendar a vistoria do veículo.",
-                guidance_for_llm: "Proponha datas e janelas para vistoria. Use a ferramenta 'schedule_vehicle_inspection' quando o cliente indicar disponibilidade. Informe local (se aplicável), requisitos e duração aproximada.",
-                completion_check: (profile) => profile && ((profile.tags && profile.tags.includes("vistoria_agendada")) || (profile.ultimoResumoDaSituacao && profile.ultimoResumoDaSituacao.toLowerCase().includes("vistoria agendada")))
-            },
-            {
-                name: "FinalizeMembership",
-                objective: "Confirmar ativação da proteção e próximos contatos.",
-                guidance_for_llm: "Confirme que a adesão foi concluída/encaminhada para ativação após vistoria e pagamento, conforme política. Oriente sobre como solicitar assistências 24h, emitir 2ª via de boleto e abrir sinistro caso necessário.",
-                completion_check: (profile) => profile && ((profile.tags && profile.tags.includes("adesao_concluida")) || (profile.ultimoResumoDaSituacao && profile.ultimoResumoDaSituacao.toLowerCase().includes("adesão concluída")))
-            }
-        ]
-    },
-    "ClaimsOpeningAndFollowUp": {
-        goal: "Ajudar o cliente a abrir um sinistro e orientar sobre protocolo, documentos e acompanhamento.",
-        steps: [
-            {
-                name: "TriageAndEligibility",
-                objective: "Entender o ocorrido, verificar elegibilidade básica e acionar o fluxo correto (assistência 24h ou abertura de sinistro).",
-                guidance_for_llm: "Pergunte de forma empática: o que aconteceu (roubo, colisão, pane), quando, onde e se há vítimas. Se for emergência/assistência, instrua a acionar 24h. Se for sinistro, prossiga para coleta de dados para abertura.",
-                completion_check: (profile) => profile && profile.ultimoResumoDaSituacao && /triagem (concluída|concluida)/i.test(profile.ultimoResumoDaSituacao)
-            },
-            {
-                name: "CollectOccurrenceDetails",
-                objective: "Coletar dados essenciais do sinistro (data, local, boletim quando aplicável, descrição).",
-                guidance_for_llm: "Solicite: data e hora, local, breve descrição, boletim de ocorrência (se aplicável) e contato preferido. Mantenha mensagens curtas e objetivas.",
-                completion_check: (profile) => profile && profile.sinistro && profile.sinistro.data && profile.sinistro.local
-            },
-            {
-                name: "OpenClaim",
-                objective: "Abrir sinistro e gerar protocolo.",
-                guidance_for_llm: "Use 'open_claim_and_get_protocol' com os dados coletados. Compartilhe o protocolo ao cliente e explique próximos passos e documentos."
-                ,
-                completion_check: (profile) => profile && ((profile.tags && profile.tags.includes("sinistro_aberto")) || (profile.ultimoResumoDaSituacao && profile.ultimoResumoDaSituacao.toLowerCase().includes("protocolo gerado")))
-            },
-            {
-                name: "FollowUpAndDocs",
-                objective: "Orientar sobre documentos e prazos, e combinar próximos contatos.",
-                guidance_for_llm: "Envie lista de documentos, prazos estimados e canais de contato. Combine atualização de status e ofereça suporte adicional.",
-                completion_check: (profile) => profile && profile.ultimoResumoDaSituacao && profile.ultimoResumoDaSituacao.toLowerCase().includes("orientações enviadas")
-            }
-        ]
-    },
     "LeadQualificationToMeeting": {
         goal: "Conduzir o lead desde o contato inicial até o agendamento de uma reunião, qualificando-o ao longo do caminho.",
         steps: [
@@ -76,7 +11,21 @@ const PLANS = {
                 name: "InitialContactAndPainDiscovery",
                 objective: "Estabelecer contato, apresentar-se e começar a identificar a principal dor ou necessidade do lead.",
                 guidance_for_llm: "Seu foco neste momento é fazer o lead se sentir ouvido e começar a articular o principal desafio ou motivo do contato. Use o fluxo de 'Conexão e Descoberta Inicial' e 'Identificação e Exploração da Dor' do seu prompt base. Pergunte abertamente sobre o que o lead precisa ou qual problema enfrenta.",
-                completion_check: (profile) => profile && profile.principaisDores && profile.principaisDores.length > 0 && profile.ultimoResumoDaSituacao && profile.ultimoResumoDaSituacao.toLowerCase().includes("dor identificada"),
+                completion_check: (profile) => {
+                    if (!profile) return false;
+                    // 1) Dores identificadas explicitamente
+                    if (Array.isArray(profile.principaisDores) && profile.principaisDores.length > 0) return true;
+                    // 2) Indícios no resumo textual
+                    const resumo = String(profile.ultimoResumoDaSituacao || '').toLowerCase();
+                    const painHints = [
+                        'dor', 'problema', 'perco', 'perda', 'impacto', 'demora', 'atraso', 'filas', 'reclama'
+                    ];
+                    if (painHints.some(h => resumo.includes(h))) return true;
+                    // 3) Tags marcadoras
+                    const tags = Array.isArray(profile.tags) ? profile.tags.map(t => String(t).toLowerCase()) : [];
+                    if (tags.includes('dor_identificada') || tags.some(t => t.startsWith('pain:'))) return true;
+                    return false;
+                },
                 on_failure_next_step: null, // Ou poderia ser um nome de etapa específica para lidar com falha na descoberta
             },
             {
@@ -173,6 +122,25 @@ class Planner {
             return this.plan.steps[this.currentStepIndex];
         }
         return null;
+    }
+
+    // Marca a etapa atual como concluída e avança para a próxima (sem depender do completion_check)
+    completeCurrentStepWithReason(reason = 'manual_complete') {
+        const currentStep = this.getCurrentStep();
+        if (!currentStep || currentStep.status !== 'active' || this.status !== 'active') return false;
+        currentStep.status = 'completed';
+        currentStep.retries = 0;
+        console.log(`[Planner] Etapa '${currentStep.name}' concluída por '${reason}' para ${this.leadId}.`);
+        this.currentStepIndex++;
+        if (this.currentStepIndex < this.plan.steps.length) {
+            this.plan.steps[this.currentStepIndex].status = 'active';
+            console.log(`[Planner] Próxima etapa ATIVA: '${this.getCurrentStep().name}' (Plano: ${this.selectedPlanName}).`);
+            return true;
+        } else {
+            this.status = 'completed';
+            console.log(`[Planner] Todas as etapas concluídas para ${this.leadId} (Plano: ${this.selectedPlanName}).`);
+            return true;
+        }
     }
 
     getGuidanceForLLM(leadProfile) {
@@ -285,11 +253,6 @@ class Planner {
         const tags = leadProfile.tags || [];
         const interesseReuniao = leadProfile.nivelDeInteresseReuniao;
         const ultimoResumo = leadProfile.ultimoResumoDaSituacao || "";
-
-        if (tags.includes("sinistro") || (ultimoResumo && /sinistro|roubo|colis[aã]o|pane/i.test(ultimoResumo))) {
-            console.log(`[Planner Select] Selecionando plano 'ClaimsOpeningAndFollowUp' para ${leadProfile.idWhatsapp} devido a menção de sinistro/ocorrência.`);
-            return "ClaimsOpeningAndFollowUp";
-        }
 
         if (tags.includes("lead_frio") || (interesseReuniao === "inicial" && ultimoResumo.includes("sem resposta"))) {
             // Poderia verificar a data da última interação aqui também

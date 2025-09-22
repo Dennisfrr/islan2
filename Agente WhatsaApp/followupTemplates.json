@@ -1,0 +1,31 @@
+[
+  {
+    "id": "negotiation_default",
+    "stage": "negotiation",
+    "persona": "default",
+    "language": "pt-BR",
+    "tone": "respeitoso e direto",
+    "maxChars": 420,
+    "template": "Olá {{firstName}}! Conseguiu avaliar nossa proposta sobre {{painHint}}? Posso esclarecer alguma dúvida ou ajustar algo para ficar redondo? Se fizer sentido, posso te enviar 2 opções de formato/valor."
+  },
+  {
+    "id": "proposal_followup",
+    "stage": "proposal",
+    "persona": "default",
+    "language": "pt-BR",
+    "tone": "consultivo",
+    "maxChars": 420,
+    "template": "{{firstName}}, tudo bem? Ficou alguma dúvida sobre a proposta que te enviei? Se preferir, marcamos uma call rápida (15min) para alinhar pontos e próximos passos."
+  },
+  {
+    "id": "cold_reengagement",
+    "stage": "cold",
+    "persona": "default",
+    "language": "pt-BR",
+    "tone": "amigável",
+    "maxChars": 300,
+    "template": "Oi {{firstName}}! Aqui é {{agentName}}. Sumimos por aqui — houve alguma mudança de prioridade desde nossa última conversa? Se ainda fizer sentido, posso te mandar um resumo objetivo e próximos passos." 
+  }
+]
+
+

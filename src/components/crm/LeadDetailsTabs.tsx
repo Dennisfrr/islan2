@@ -20,12 +20,12 @@ export function LeadDetailsTabs({ leadId }: LeadDetailsTabsProps) {
         <TabsTrigger value="comms">Comunicações <Badge variant="secondary" className="ml-2">{communications.length}</Badge></TabsTrigger>
       </TabsList>
       <TabsContent value="overview">
-        <Card className="bg-gradient-card border-border"><CardContent className="p-4 text-sm text-muted-foreground">Resumo do lead e campos principais.</CardContent></Card>
+        <Card className="border-border/50 shadow-none"><CardContent className="p-4 text-sm text-foreground/70">Resumo do lead e campos principais.</CardContent></Card>
       </TabsContent>
       <TabsContent value="activities">
         <div className="space-y-2">
           {activities.map(a => (
-            <Card key={a.id} className="bg-card border-border"><CardContent className="p-3 text-sm"><span className="capitalize">[{a.type}]</span> {a.title} {a.due_date ? `— até ${new Date(a.due_date).toLocaleString('pt-BR')}` : ''}</CardContent></Card>
+            <Card key={a.id} className="border-border"><CardContent className="p-3 text-sm"><span className="capitalize">[{a.type}]</span> {a.title} {a.due_date ? `— até ${new Date(a.due_date).toLocaleString('pt-BR')}` : ''}</CardContent></Card>
           ))}
           {activities.length === 0 && <p className="text-xs text-muted-foreground">Sem atividades.</p>}
         </div>
@@ -33,7 +33,7 @@ export function LeadDetailsTabs({ leadId }: LeadDetailsTabsProps) {
       <TabsContent value="comms">
         <div className="space-y-2">
           {communications.map(c => (
-            <Card key={c.id} className="bg-card border-border"><CardContent className="p-3 text-sm">[{c.type} • {c.direction}] {c.content}</CardContent></Card>
+            <Card key={c.id} className="border-border"><CardContent className="p-3 text-sm">[{c.type} • {c.direction}] {c.content}</CardContent></Card>
           ))}
           {communications.length === 0 && <p className="text-xs text-muted-foreground">Sem comunicações.</p>}
         </div>

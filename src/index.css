@@ -8,107 +8,253 @@ All colors MUST be HSL.
 
 @layer base {
   :root {
-    /* CRM Theme - Darker Gray */
-    --background: 0 0% 6%;
-    --foreground: 210 20% 94%;
+    /* CRM Theme - Monochrome Luxe (Light) */
+    --background: 0 0% 98%;
+    --foreground: 0 0% 7%;
 
-    --card: 0 0% 8%;
-    --card-foreground: 210 20% 94%;
+    --card: 0 0% 98%;
+    --card-foreground: 0 0% 7%;
 
-    --popover: 0 0% 8%;
-    --popover-foreground: 210 20% 94%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 7%;
 
-    --primary: 51 100% 50%;
-    --primary-foreground: 0 0% 6%;
+    --primary: 0 0% 7%; /* near-black */
+    --primary-foreground: 0 0% 100%;
 
-    --secondary: 0 0% 12%;
-    --secondary-foreground: 210 20% 90%;
+    --secondary: 0 0% 96%;
+    --secondary-foreground: 0 0% 20%;
 
-    --muted: 0 0% 14%;
-    --muted-foreground: 210 10% 70%;
+    --muted: 0 0% 95%;
+    --muted-foreground: 0 0% 45%;
 
-    --accent: 45 100% 60%;
-    --accent-foreground: 0 0% 6%;
+    --accent: 0 0% 96%;
+    --accent-foreground: 0 0% 20%;
 
-    --destructive: 0 84% 60%;
-    --destructive-foreground: 0 0% 98%;
+    --destructive: 0 84% 55%;
+    --destructive-foreground: 0 0% 100%;
 
-    --border: 0 0% 15%;
-    --input: 0 0% 12%;
-    --ring: 51 100% 50%;
+    --border: 0 0% 90%;
+    --input: 0 0% 90%;
+    --ring: 0 0% 7%;
 
-    --success: 142 70% 45%;
-    --warning: 38 92% 50%;
-    --info: 210 100% 50%;
+    /* Keep status hues very subtle to preserve monochrome feel */
+    --success: 142 8% 30%;
+    --warning: 38 10% 40%;
+    --info: 217 8% 40%;
 
-    /* Gradients e sombras levemente atualizados */
-    --gradient-primary: linear-gradient(135deg, hsl(51 100% 50%), hsl(45 100% 60%));
-    --gradient-dark: linear-gradient(135deg, hsl(0 0% 6%), hsl(0 0% 10%));
-    --gradient-card: linear-gradient(135deg, hsl(0 0% 8%), hsl(0 0% 12%));
+    /* Monochrome gradients and shadows */
+    --gradient-primary: linear-gradient(180deg, hsl(0 0% 100%), hsl(0 0% 96%));
+    --gradient-dark: linear-gradient(180deg, hsl(0 0% 12%), hsl(0 0% 4%));
+    --gradient-card: linear-gradient(180deg, hsl(0 0% 100%), hsl(0 0% 98%));
 
-    --shadow-primary: 0 10px 40px -15px hsl(51 100% 50% / 0.25);
-    --shadow-card: 0 6px 24px -8px hsl(0 0% 0% / 0.4);
-    --shadow-glow: 0 0 16px hsl(51 100% 50% / 0.2);
+    --shadow-primary: 0 18px 60px -24px hsl(0 0% 0% / 0.18);
+    --shadow-card: 0 10px 34px -16px hsl(0 0% 0% / 0.16);
+    --shadow-glow: 0 0 28px hsl(0 0% 100% / 0.12);
 
-    --radius: 0.75rem;
+    --radius: 14px;
 
-    /* Sidebar escura por padrão */
-    --sidebar-background: 0 0% 8%;
-    --sidebar-foreground: 0 0% 90%;
-    --sidebar-primary: 0 0% 14%;
-    --sidebar-primary-foreground: 0 0% 98%;
+    /* Sidebar - Deep Monochrome */
+    --sidebar-background: 0 0% 7%;
+    --sidebar-foreground: 0 0% 96%;
+    --sidebar-primary: 0 0% 100%;
+    --sidebar-primary-foreground: 0 0% 7%;
     --sidebar-accent: 0 0% 12%;
     --sidebar-accent-foreground: 0 0% 96%;
     --sidebar-border: 0 0% 16%;
-    --sidebar-ring: 51 100% 50%;
+    --sidebar-ring: 0 0% 100%;
   }
 
   .dark {
-    --background: 0 0% 6%;
-    --foreground: 210 20% 94%;
+    --background: 0 0% 4%;
+    --foreground: 0 0% 98%;
 
-    --card: 0 0% 8%;
-    --card-foreground: 210 20% 94%;
+    --card: 0 0% 6%;
+    --card-foreground: 0 0% 98%;
 
-    --popover: 0 0% 8%;
-    --popover-foreground: 210 20% 94%;
+    --popover: 0 0% 6%;
+    --popover-foreground: 0 0% 98%;
 
-    --primary: 210 40% 98%;
-    --primary-foreground: 222.2 47.4% 11.2%;
+    --primary: 0 0% 100%;
+    --primary-foreground: 0 0% 7%;
 
-    --secondary: 0 0% 12%;
-    --secondary-foreground: 210 20% 94%;
+    --secondary: 0 0% 10%;
+    --secondary-foreground: 0 0% 100%;
 
-    --muted: 0 0% 14%;
-    --muted-foreground: 210 10% 70%;
+    --muted: 0 0% 12%;
+    --muted-foreground: 0 0% 64%;
 
-    --accent: 0 0% 14%;
-    --accent-foreground: 210 20% 94%;
+    --accent: 0 0% 10%;
+    --accent-foreground: 0 0% 100%;
 
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
 
-    --border: 0 0% 16%;
-    --input: 0 0% 14%;
-    --ring: 212.7 26.8% 83.9%;
+    --border: 0 0% 18%;
+    --input: 0 0% 18%;
+    --ring: 0 0% 100%;
 
-    --sidebar-background: 0 0% 8%;
-    --sidebar-foreground: 0 0% 90%;
-    --sidebar-primary: 0 0% 14%;
-    --sidebar-primary-foreground: 0 0% 98%;
-    --sidebar-accent: 0 0% 12%;
+    --sidebar-background: 0 0% 5%;
+    --sidebar-foreground: 0 0% 96%;
+    --sidebar-primary: 0 0% 100%;
+    --sidebar-primary-foreground: 0 0% 7%;
+    --sidebar-accent: 0 0% 8%;
     --sidebar-accent-foreground: 0 0% 96%;
-    --sidebar-border: 0 0% 16%;
-    --sidebar-ring: 51 100% 50%;
+    --sidebar-border: 0 0% 18%;
+    --sidebar-ring: 0 0% 100%;
   }
 }
 
 @layer base {
   * {
-    @apply border-border;
+    @apply border-border antialiased;
+  }
+
+  html, body {
+    font-family: "Inter", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
   }
 
   body {
     @apply bg-background text-foreground;
+    /* Monochrome subtle vignette + noise */
+    background-image:
+      radial-gradient(1200px 600px at 100% -20%, hsl(0 0% 0% / 0.06), transparent 60%),
+      radial-gradient(800px 400px at -10% 120%, hsl(0 0% 0% / 0.04), transparent 50%),
+      url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" viewBox="0 0 160 160"><filter id="n"><feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="4" stitchTiles="stitch"/></filter><rect width="100%" height="100%" filter="url(%23n)" opacity="0.015"/></svg>');
+    background-attachment: fixed;
+    background-repeat: no-repeat;
+  }
+}
+
+@layer components {
+  /* Sidebar styles */
+  .sidebar-glass {
+    @apply bg-sidebar/80 backdrop-blur-md shadow-[inset_0_1px_0_hsl(var(--sidebar-border)/0.6),8px_0_32px_-16px_hsl(var(--sidebar-foreground)/0.18)];
+  }
+
+  .sidebar-gradient-border { position: relative; }
+  .sidebar-gradient-border::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    border-right: 1px solid transparent;
+    background: linear-gradient(hsl(var(--sidebar-background)), hsl(var(--sidebar-background))) padding-box,
+                conic-gradient(from var(--angle, 0deg), hsl(0 0% 100% / 0.12), hsl(0 0% 100% / 0.02), hsl(0 0% 100% / 0.12)) border-box;
+    mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    animation: sidebar-border-rotate 10s linear infinite;
+  }
+
+  @keyframes sidebar-border-rotate { to { --angle: 360deg; } }
+
+  .sidebar-spotlight { position: relative; }
+  .sidebar-spotlight::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: radial-gradient(200px 200px at var(--mx, -200px) var(--my, -200px), hsl(var(--sidebar-foreground) / 0.06), transparent 60%);
+    transition: opacity 200ms ease-out;
+    opacity: var(--spot, 0);
+  }
+
+  .sidebar-item { @apply transition-transform duration-200 ease-out; }
+  .sidebar-item:hover { transform: translateX(2px); }
+  .sidebar-item:active { transform: translateX(0); }
+
+  .sidebar-item-active {
+    @apply text-sidebar-foreground border border-sidebar-border;
+    background: linear-gradient(90deg, hsl(var(--sidebar-accent) / 0.9), hsl(var(--sidebar-accent) / 0.6));
+    box-shadow: 0 8px 28px -16px hsl(var(--sidebar-foreground) / 0.18), inset 0 1px 0 hsl(var(--sidebar-foreground) / 0.06);
+  }
+
+  /* Pill style like the reference */
+  .sidebar-pill { @apply rounded-xl; }
+  .sidebar-pill-active {
+    background-image: linear-gradient(90deg, hsl(var(--sidebar-foreground) / 0.08), hsl(var(--sidebar-foreground) / 0.02));
+    border: 1px solid hsl(var(--sidebar-border));
+    box-shadow: 0 8px 28px -20px hsl(var(--sidebar-foreground) / 0.22);
+  }
+
+  /* Brand gradient dot */
+  .brand-dot {
+    background-image: radial-gradient(60% 60% at 30% 30%, #7c3aed, transparent), radial-gradient(60% 60% at 70% 70%, #2563eb, transparent);
+  }
+
+  .sidebar-indicator {
+    position: absolute;
+    left: 0;
+    width: 3px;
+    border-radius: 9999px;
+    background: hsl(var(--sidebar-foreground));
+    opacity: 0;
+    transition: top 200ms ease, height 200ms ease, opacity 200ms ease;
+  }
+
+  .sidebar-section-title {
+    @apply px-3 pt-2 pb-1 text-[10px] uppercase tracking-wider text-sidebar-foreground/50 select-none;
+  }
+
+  .badge-dot {
+    position: absolute;
+    top: 6px;
+    right: 8px;
+    width: 8px;
+    height: 8px;
+    border-radius: 9999px;
+    background: hsl(var(--sidebar-foreground));
+    box-shadow: 0 0 0 2px hsl(var(--sidebar-background));
+  }
+
+  /* Glassmorphism variant */
+  .card-glass {
+    @apply bg-white/10 dark:bg-white/5 backdrop-blur-md border-white/10;
+  }
+
+  /* Spotlight follows cursor using CSS variables --mx/--my and --spot */
+  .card-spotlight {
+    position: relative;
+  }
+  .card-spotlight::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    border-radius: inherit;
+    background: radial-gradient(200px 200px at var(--mx, -200px) var(--my, -200px), hsl(0 0% 100% / 0.10), transparent 60%);
+    opacity: var(--spot, 0);
+    transition: opacity 200ms ease-out;
+  }
+
+  /* Tilt 3D variant. Uses --tiltX/--tiltY set inline for rotation. */
+  .card-tilt {
+    transform: var(--tw-transform) rotateX(var(--tiltY, 0deg)) rotateY(var(--tiltX, 0deg));
+    transform-style: preserve-3d;
+    transition: transform 200ms ease-out;
+  }
+
+  /* Animated gradient border using mask trick */
+  .card-gradient-border {
+    position: relative;
+    border-color: transparent !important;
+  }
+  .card-gradient-border::before {
+    content: "";
+    position: absolute;
+    inset: -1px;
+    border-radius: inherit;
+    padding: 1px;
+    background: conic-gradient(from var(--angle, 0deg), hsl(0 0% 100% / 0.12), hsl(0 0% 100% / 0.02), hsl(0 0% 100% / 0.12));
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+    animation: card-border-rotate 6s linear infinite;
+  }
+
+  @keyframes card-border-rotate {
+    to { --angle: 360deg; }
   }
 }

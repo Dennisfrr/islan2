@@ -1,51 +1,77 @@
 {
-  "VehicleProtectionQuoteOnboarding": {
-    "goal": "Conduzir o cliente desde a cotação até a adesão da proteção veicular.",
+  "LeadQualificationToMeeting": {
+    "id": "LeadQualificationToMeeting",
+    "version": 1,
+    "goal": "Conduzir o lead desde o contato inicial até o agendamento de uma reunião, qualificando-o ao longo do caminho.",
+    "maxRetriesPerStep": 2,
     "steps": [
       {
-        "name": "CollectVehicleAndProfileData",
-        "objective": "Coletar dados essenciais do veículo e do condutor.",
-        "guidance_for_llm": "Peça modelo/ano, cidade/CEP, uso, condutores. Mensagens curtas.",
-        "completion_rules": {
-          "requires_profile_fields": ["veiculo.modelo", "veiculo.ano"],
-          "any_of_profile_fields": ["veiculo.cidade", "veiculo.cep"]
-        }
+        "name": "InitialContactAndPainDiscovery",
+        "objective": "Estabelecer contato, apresentar-se e começar a identificar a principal dor ou necessidade do lead.",
+        "guidance": "Seu foco neste momento é fazer o lead se sentir ouvido e começar a articular o principal desafio ou motivo do contato. Use o fluxo de 'Conexão e Descoberta Inicial' e 'Identificação e Exploração da Dor' do seu prompt base. Pergunte abertamente sobre o que o lead precisa ou qual problema enfrenta.",
+        "completion": [
+          { "type": "array_nonempty", "path": "principaisDores" },
+          { "type": "text_includes_any", "path": "ultimoResumoDaSituacao", "values": ["dor", "problema", "perco", "perda", "impacto", "demora", "atraso", "filas", "reclama"], "ci": true },
+          { "type": "tags_includes_any", "values": ["dor_identificada"], "prefixAny": "pain:" }
+        ],
+        "onFailureNextStep": null
       },
       {
-        "name": "ProvideQuoteAndOptions",
-        "objective": "Calcular e apresentar a cotação com opções.",
-        "guidance_for_llm": "Use calculate_vehicle_protection_quote e explique coberturas.",
-        "completion_rules": {
-          "profile_tags_contains": ["cotacao_calculada"],
-          "or_text_in_profile_summary": ["cotação calculada"]
-        }
+        "name": "PainDeepDiveAndImpactValidation",
+        "objective": "Aprofundar na dor identificada, entender seu impacto no negócio do lead e validar a importância dessa dor para ele.",
+        "guidance": "Explore as consequências da dor mencionada. Use o fluxo de 'Aprofundamento na Dor Identificada'. Valide se essa dor é realmente significativa para o lead, perguntando sobre os impactos que ela causa.",
+        "completion": [
+          { "type": "text_includes", "path": "ultimoResumoDaSituacao", "value": "impacto da dor discutido", "ci": true }
+        ]
       },
       {
-        "name": "ProposalAndDocs",
-        "objective": "Gerar proposta/adesão e orientar documentos.",
-        "guidance_for_llm": "Use generate_membership_proposal e liste documentos necessários.",
-        "completion_rules": {
-          "profile_tags_contains": ["proposta_gerada"],
-          "or_text_in_profile_summary": ["proposta gerada"]
-        }
+        "name": "ValuePropositionAndLightSolution",
+        "objective": "Conectar a dor validada a uma proposta de valor e apresentar uma leve sugestão de como a empresa pode ajudar, possivelmente com prova social.",
+        "guidance": "Faça a transição para como os problemas do lead podem ser resolvidos. Use 'Transição para Valor'. Considere usar a ferramenta 'get_relevant_case_studies_or_social_proof' se o lead parecer cético ou se o perfil indicar que seria útil. Apresente brevemente como sua solução pode ajudar com a dor específica.",
+        "completion": [
+          { "type": "array_nonempty", "path": "solucoesJaDiscutidas" },
+          { "type": "text_includes", "path": "ultimoResumoDaSituacao", "value": "solução apresentada", "ci": true }
+        ]
       },
       {
-        "name": "ScheduleInspection",
-        "objective": "Agendar a vistoria do veículo.",
-        "guidance_for_llm": "Proponha datas e janelas; use schedule_vehicle_inspection.",
-        "completion_rules": {
-          "profile_tags_contains": ["vistoria_agendada"],
-          "or_text_in_profile_summary": ["vistoria agendada"]
-        }
+        "name": "MeetingProposal",
+        "objective": "Propor uma reunião como o próximo passo lógico para discutir a solução de forma mais aprofundada e personalizada.",
+        "guidance": "Se o lead demonstrou interesse na solução ou no valor apresentado, proponha uma reunião. Use 'Identificando o Momento Ideal para o CTA da Reunião'. Seja claro sobre o objetivo e o baixo compromisso da reunião inicial.",
+        "completion": [
+          { "type": "in_list", "path": "nivelDeInteresseReuniao", "values": ["médio", "alto", "agendado"], "ci": true }
+        ]
       },
       {
-        "name": "FinalizeMembership",
-        "objective": "Confirmar ativação e próximos contatos.",
-        "guidance_for_llm": "Confirme adesão/ativação pós-vistoria; oriente canais e 2ª via.",
-        "completion_rules": {
-          "profile_tags_contains": ["adesao_concluida"],
-          "or_text_in_profile_summary": ["adesão concluída"]
-        }
+        "name": "HandleObjectionsAndSchedule",
+        "objective": "Lidar com objeções à reunião e, se aceita, facilitar o agendamento.",
+        "guidance": "Se houver objeções à reunião, trate-as com empatia e reforce o valor. Se a reunião for aceita, ajude a agendar. Use 'Tratamento de Objeções e Agendamento'.",
+        "completion": [
+          { "type": "text_includes", "path": "nivelDeInteresseReuniao", "value": "agendado", "ci": true }
+        ]
+      }
+    ]
+  },
+  "ColdLeadReEngagement": {
+    "id": "ColdLeadReEngagement",
+    "version": 1,
+    "goal": "Reengajar um lead frio ou que não interage há algum tempo, tentando reacender o interesse.",
+    "maxRetriesPerStep": 2,
+    "steps": [
+      {
+        "name": "GentleReIntroduction",
+        "objective": "Reintroduzir-se de forma suave e verificar se o lead tem disponibilidade ou interesse em retomar a conversa.",
+        "guidance": "Seja breve, amigável e não pressione. Lembre o lead quem você é e ofereça algo de valor ou uma pergunta aberta. Ex: 'Olá [Nome do Lead], aqui é o [Seu Nome] da [Sua Empresa]. Estava a pensar se conseguiu avançar com [tópico anterior] ou se surgiu algo novo em que posso ajudar?'",
+        "completion": [
+          { "type": "text_includes_any", "path": "ultimoResumoDaSituacao", "values": ["lead respondeu ao reengajamento", "interesse demonstrado"], "ci": true }
+        ]
+      },
+      {
+        "name": "IdentifyCurrentNeedsOrChanges",
+        "objective": "Se o lead responder positivamente, tentar identificar necessidades atuais ou mudanças desde o último contato.",
+        "guidance": "Pergunte sobre novidades, desafios recentes ou se as prioridades mudaram. O objetivo é encontrar um novo ponto de conexão.",
+        "completion": [
+          { "type": "array_nonempty", "path": "principaisDores" }
+        ]
       }
     ]
   }

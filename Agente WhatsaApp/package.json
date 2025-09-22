@@ -9,8 +9,6 @@
     "dashboard": "node server.js",
     "dev": "nodemon index.js",
     "dashboard-dev": "nodemon server.js",
-    "dashboard-worker": "node dashboard-worker.js",
-    "dashboard-worker-dev": "nodemon dashboard-worker.js",
     "populate:schemas": "node -e \"(async()=>{const {popularEsquemasIniciais}=require('./index');await popularEsquemasIniciais();process.exit(0)})();\"",
     "populate:social": "node -e \"(async()=>{const {popularSocialProofData}=require('./index');await popularSocialProofData();process.exit(0)})();\"",
     "populate:all": "npm run populate:schemas && npm run populate:social"
@@ -27,6 +25,7 @@
   "license": "MIT",
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
+    "@supabase/supabase-js": "^2.54.0",
     "@wppconnect-team/wppconnect": "^1.9.1",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",

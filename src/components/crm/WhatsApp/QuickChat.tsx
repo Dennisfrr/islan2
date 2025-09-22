@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import React, { useMemo } from 'react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { useLeads } from '@/hooks/useLeads'
 import { useCommunications } from '@/hooks/useCommunications'
@@ -9,13 +9,27 @@ interface QuickChatProps {
   leadId?: string
   open: boolean
   onOpenChange: (open: boolean) => void
+  prefillText?: string
+  autoSend?: boolean
 }
 
-export function QuickChat({ leadId, open, onOpenChange }: QuickChatProps) {
+export function QuickChat({ leadId, open, onOpenChange, prefillText, autoSend }: QuickChatProps) {
   const { leads } = useLeads()
   const lead = useMemo(() => leads.find(l => l.id === leadId), [leads, leadId])
   const { communications, sendMessage, isSending } = useCommunications(leadId, 'whatsapp')
   const infinite = useCommunicationsInfinite(leadId, 'whatsapp')
+  const [pendingPrefill, setPendingPrefill] = React.useState<string | null>(null)
+
+  React.useEffect(() => {
+    if (open && prefillText) {
+      setPendingPrefill(prefillText)
+      if (autoSend && leadId) {
+        sendMessage({ leadId, body: prefillText })
+      }
+    } else {
+      setPendingPrefill(null)
+    }
+  }, [open, prefillText, autoSend, leadId])
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -34,6 +48,7 @@ export function QuickChat({ leadId, open, onOpenChange }: QuickChatProps) {
             onLoadMore={() => { if (infinite.hasNextPage) infinite.fetchNextPage() }}
             hasMore={Boolean(infinite.hasNextPage)}
             isLoadingMore={infinite.isFetchingNextPage}
+            prefill={pendingPrefill || undefined}
           />
         </div>
       </DialogContent>

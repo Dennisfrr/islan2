@@ -1,0 +1,265 @@
+{
+  "id": "LeadQualificationToMeeting-Law",
+  "version": 1,
+  "status": "draft",
+  "goal": "Conduzir o lead até uma avaliação jurídica inicial sem compromisso.",
+  "locale": "pt_BR",
+  "defaults": {
+    "maxRetriesPerStep": 2,
+    "tone": "formal",
+    "compliance": {
+      "mustInclude": [
+        "avaliação inicial",
+        "sem compromisso"
+      ],
+      "forbidden": [
+        "garantimos vitória",
+        "resultado certo",
+        "promessa de êxito"
+      ]
+    }
+  },
+  "steps": [
+    {
+      "name": "IdentificarArea",
+      "objective": "Identificar a área do direito envolvida.",
+      "guidance": "Seja objetivo e cortês; ofereça opções claras (trabalhista, cível, consumidor, família, empresarial).",
+      "messages": {
+        "first": "Para eu direcionar certo: é trabalhista, cível, consumidor, família ou empresarial?"
+      },
+      "completionMode": "any",
+      "completion": [
+        {
+          "type": "entity_detected",
+          "path": "slots.area",
+          "values": [
+            "trabalhista",
+            "cível",
+            "consumidor",
+            "família",
+            "empresarial"
+          ]
+        },
+        {
+          "type": "text_includes_any",
+          "path": "ultimoResumoDaSituacao",
+          "values": [
+            "processo",
+            "contrato",
+            "ação",
+            "acordo",
+            "indenização"
+          ],
+          "ci": true
+        }
+      ],
+      "transitions": [
+        {
+          "when": {
+            "type": "text_includes_any",
+            "path": "ultimoResumoDaSituacao",
+            "values": [
+              "trabalhista",
+              "justa causa",
+              "verbas"
+            ]
+          },
+          "goTo": "QualificarCasoTrabalhista"
+        }
+      ]
+    },
+    {
+      "name": "QualificarCasoTrabalhista",
+      "objective": "Coletar fatos-chave (vínculo, datas, documentos) para casos trabalhistas.",
+      "guidance": "Pergunte por datas de admissão/demissão, função, salário e se possui documentos (contracheques, CTPS, acordos).",
+      "messages": {
+        "first": "Pode compartilhar datas de admissão/demissão, função e se possui contracheques/CTPS?"
+      },
+      "completionMode": "any",
+      "completion": [
+        {
+          "type": "array_nonempty",
+          "path": "documentosAnexados"
+        },
+        {
+          "type": "gte",
+          "path": "fatos.itensPreenchidos",
+          "value": 3
+        }
+      ],
+      "transitions": [
+        {
+          "when": {
+            "type": "gte",
+            "path": "fatos.itensPreenchidos",
+            "value": 3
+          },
+          "goTo": "PropostaAvaliacao"
+        }
+      ],
+      "maxRetries": 3
+    },
+    {
+      "name": "QualificarCasoGeral",
+      "objective": "Coletar fatos-chave para demais áreas (cível, consumidor, família, empresarial).",
+      "guidance": "Peça um resumo objetivo do caso e se há prazos correndo; pergunte por documentos relevantes.",
+      "messages": {
+        "first": "Pode me resumir o caso em 2–3 linhas e dizer se há algum prazo correndo? Tem documentos?"
+      },
+      "completionMode": "any",
+      "completion": [
+        {
+          "type": "text_includes_any",
+          "path": "ultimoResumoDaSituacao",
+          "values": [
+            "prazo",
+            "urgente",
+            "liminar",
+            "audiência"
+          ],
+          "ci": true
+        },
+        {
+          "type": "array_nonempty",
+          "path": "documentosAnexados"
+        }
+      ],
+      "transitions": [
+        {
+          "when": {
+            "type": "exists",
+            "path": "documentosAnexados.0"
+          },
+          "goTo": "PropostaAvaliacao"
+        },
+        {
+          "when": {
+            "type": "tags_includes_any",
+            "values": [
+              "urgente"
+            ]
+          },
+          "goTo": "PropostaAvaliacao"
+        }
+      ]
+    },
+    {
+      "name": "PropostaAvaliacao",
+      "objective": "Propor avaliação jurídica inicial sem compromisso e alinhar expectativas.",
+      "guidance": "Explique escopo e duração, use linguagem clara e inclua 'avaliação inicial' e 'sem compromisso'.",
+      "messages": {
+        "first": "Posso te oferecer uma avaliação inicial sem compromisso (30 min) para entender melhor e orientar próximos passos. Pode ser?"
+      },
+      "completionMode": "any",
+      "completion": [
+        {
+          "type": "in_list",
+          "path": "nivelDeInteresseReuniao",
+          "values": [
+            "médio",
+            "alto",
+            "agendado"
+          ],
+          "ci": true
+        }
+      ],
+      "tools": [
+        {
+          "id": "crm-update",
+          "action": "add_tag",
+          "params": {
+            "tag": "lead:quente"
+          },
+          "when": "onCompletion"
+        },
+        {
+          "id": "calendar-booking",
+          "action": "suggest_slots",
+          "params": {
+            "daysAhead": 3,
+            "duration": 30,
+            "title": "Avaliação Jurídica - Sem Compromisso"
+          },
+          "when": "onCompletion"
+        }
+      ]
+    },
+    {
+      "name": "Agendamento",
+      "objective": "Sugerir janelas de horário, confirmar e registrar o agendamento.",
+      "guidance": "Sugira 2–3 horários próximos, confirme melhor opção e gere o evento com link.",
+      "messages": {
+        "first": "Tenho estes horários: {slot1}, {slot2}, {slot3}. Algum funciona pra você?"
+      },
+      "completionMode": "all",
+      "completion": [
+        {
+          "type": "exists",
+          "path": "agendamento.confirmado"
+        },
+        {
+          "type": "text_includes",
+          "path": "nivelDeInteresseReuniao",
+          "value": "agendado",
+          "ci": true
+        }
+      ],
+      "tools": [
+        {
+          "id": "calendar-booking",
+          "action": "create_meeting",
+          "params": {
+            "duration": 30,
+            "title": "Avaliação Jurídica - Sem Compromisso"
+          },
+          "when": "onCompletion"
+        },
+        {
+          "id": "crm-update",
+          "action": "set_field",
+          "params": {
+            "field": "pipelineStage",
+            "value": "Reunião Agendada"
+          },
+          "when": "onCompletion"
+        }
+      ]
+    },
+    {
+      "name": "TratarObjecoes",
+      "objective": "Lidar com objeções e propor alternativa (assíncrono, outro horário, chamada rápida).",
+      "guidance": "Reconheça a objeção, reforce valor e ofereça opções (ex.: chamada de 15 min).",
+      "messages": {
+        "first": "Entendo perfeitamente. Podemos fazer uma chamada rápida de 15 min só para mapear o essencial — ajuda?"
+      },
+      "completionMode": "any",
+      "completion": [
+        {
+          "type": "in_list",
+          "path": "nivelDeInteresseReuniao",
+          "values": [
+            "médio",
+            "alto",
+            "agendado"
+          ],
+          "ci": true
+        }
+      ],
+      "transitions": [
+        {
+          "when": {
+            "type": "in_list",
+            "path": "nivelDeInteresseReuniao",
+            "values": [
+              "agendado"
+            ],
+            "ci": true
+          },
+          "goTo": "Agendamento"
+        }
+      ]
+    }
+  ],
+  "updatedAt": "2025-09-22T14:16:34.510823Z",
+  "updatedBy": "persona-generator"
+}

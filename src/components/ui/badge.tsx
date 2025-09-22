@@ -4,20 +4,20 @@ import { cva, type VariantProps } from "class-variance-authority"
 import { cn } from "@/lib/utils"
 
 const badgeVariants = cva(
-  "inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2",
+  "inline-flex items-center rounded-full border px-2.5 py-0.5 text-[11px] font-medium transition-colors focus:outline-none focus:ring-1 focus:ring-ring/50 focus:ring-offset-0",
   {
     variants: {
       variant: {
         default:
-          "border-transparent bg-primary text-primary-foreground hover:bg-primary/80",
+          "border-border/60 bg-muted text-foreground/80 hover:bg-muted",
         secondary:
-          "border-transparent bg-secondary text-secondary-foreground hover:bg-secondary/80",
+          "border-border/60 bg-accent text-foreground/80 hover:bg-accent",
         destructive:
-          "border-transparent bg-destructive text-destructive-foreground hover:bg-destructive/80",
-        outline: "text-foreground",
-        whatsapp: "border-transparent bg-[#25D366] text-white",
-        instagram: "border-transparent bg-gradient-to-r from-[#F58529] via-[#DD2A7B] to-[#8134AF] text-white",
-        messenger: "border-transparent bg-[#0084FF] text-white",
+          "border-border/60 bg-destructive/10 text-destructive hover:bg-destructive/15",
+        outline: "text-foreground/80 border-border/60",
+        whatsapp: "border-border/60 bg-background text-foreground/80",
+        instagram: "border-border/60 bg-background text-foreground/80",
+        messenger: "border-border/60 bg-background text-foreground/80",
       },
     },
     defaultVariants: {

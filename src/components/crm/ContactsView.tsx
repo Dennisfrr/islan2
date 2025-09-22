@@ -156,7 +156,7 @@ export function ContactsView() {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {filtered.map((lead, index) => (
-            <Card key={lead.id} className="hover:shadow-md transition-shadow">
+            <Card key={lead.id} className="transition-transform hover:-translate-y-[1px] hover:shadow-glow">
               <CardContent className="p-4">
                 <div className="flex justify-between items-start mb-3">
                   <div>

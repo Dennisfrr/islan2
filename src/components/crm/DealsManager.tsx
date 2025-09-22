@@ -97,7 +97,7 @@ export function DealsManager() {
         </Dialog>
       </div>
 
-      <Card className="bg-gradient-card border-border shadow-card mb-4">
+      <Card className="border-border/50 shadow-none mb-4">
         <CardContent className="p-4 grid grid-cols-1 md:grid-cols-4 gap-3">
           <div className="md:col-span-2">
             <Label>Busca</Label>
@@ -129,7 +129,7 @@ export function DealsManager() {
           </div>
         ) : (
           filtered.map((d) => (
-            <Card key={d.id} className="bg-gradient-card border-border shadow-card overflow-hidden break-words">
+            <Card key={d.id} className="border-border/50 shadow-none overflow-hidden break-words">
               <CardHeader>
                 <CardTitle className="flex items-center justify-between">
                   <span className="truncate">{d.title}</span>

@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from "react"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { DndContext, closestCenter, DragEndEvent } from "@dnd-kit/core"
-import { Plus, Search, MoreHorizontal, Eye, Edit, Trash2, Download, Filter, Loader2, LogOut } from "lucide-react"
+import { Plus, Search, MoreHorizontal, Eye, Edit, Trash2, Download, Filter, Loader2, LogOut, Send, CheckSquare, Sparkles, ListChecks, Target, BarChart3 } from "lucide-react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -16,6 +16,7 @@ import { useLeads, useLeadStats } from "@/hooks/useLeads"
 import { useOrg } from "@/components/org/OrgProvider"
 import { apiFetch } from "@/lib/api"
 import { CRMSidebar } from "@/components/crm/CRMSidebar"
+import GoalsPage from "./Goals"
 import { PipelineStage } from "@/components/crm/PipelineStage"
 // Produtos removido
 import { ActivitiesView } from "@/components/crm/ActivitiesView"
@@ -29,6 +30,15 @@ import { QuickChat } from "@/components/crm/WhatsApp/QuickChat"
 import { useActivities } from "@/hooks/useActivities"
 import { useDeals } from "@/hooks/useDeals"
 import { parseAndExecute } from "@/agents/crm/gemini"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import { Progress } from "@/components/ui/progress"
+import { Skeleton } from "@/components/ui/skeleton"
+import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart"
+import { PieChart, Pie, Cell } from "recharts"
+import { DashboardShell } from "@/components/dashboard/DashboardShell"
+import { QuickActionCard } from "@/components/dashboard/QuickActionCard"
+import { RecentGrid } from "@/components/dashboard/RecentGrid"
+import { LeadsTable } from "@/components/dashboard/LeadsTable"
 
 const defaultPipelineStages = [
   { id: "new", name: "Novos Leads", color: "bg-blue-500", count: 0 },
@@ -65,11 +75,30 @@ export default function KommoCRM() {
   const [newStageName, setNewStageName] = useState('')
   const [isEditModalOpen, setIsEditModalOpen] = useState(false)
   const [isDetailsModalOpen, setIsDetailsModalOpen] = useState(false)
+  const [sortByAi, setSortByAi] = useState(false)
+  const [aiScoreMap, setAiScoreMap] = useState<Record<string, number>>({})
   const { toast } = useToast()
   const { createActivity, updateActivity, deleteActivity } = useActivities()
   const { createDeal, updateDeal, deleteDeal } = useDeals()
   const [agentModalOpen, setAgentModalOpen] = useState(false)
   const [agentPrompt, setAgentPrompt] = useState('')
+  const [quickChatPrefill, setQuickChatPrefill] = useState<string | undefined>(undefined)
+  const [quickChatAutoSend, setQuickChatAutoSend] = useState<boolean>(false)
+  const [suggestLoading, setSuggestLoading] = useState(false)
+  const [suggestText, setSuggestText] = useState<string>('')
+  // Smart Summary (expanded widget)
+  const [smartSummaryOpen, setSmartSummaryOpen] = useState(false)
+  const [smartSummaryText, setSmartSummaryText] = useState<string>('')
+  const [smartSummaryBusy, setSmartSummaryBusy] = useState(false)
+  // Labels do pipeline (precisamos antes do efeito que carrega config)
+  const [stageLabels, setStageLabels] = useState<Record<string, string>>({})
+  const [isEditStagesOpen, setIsEditStagesOpen] = useState(false)
+  const [savingStages, setSavingStages] = useState(false)
+  // Dashboard extra data
+  const [dbGoals, setDbGoals] = useState<any[] | null>(null)
+  const [dbReflections, setDbReflections] = useState<any[] | null>(null)
+  const [dbLoading, setDbLoading] = useState(false)
+  // WhatsApp WPPConnect removed from Dashboard
   // Carregar labels do pipeline (persistidos no backend)
   useEffect(() => {
     const load = async () => {
@@ -86,6 +115,47 @@ export default function KommoCRM() {
     }
     load()
   }, [orgId, session?.access_token])
+
+  // Dashboard helpers removed
+  useEffect(() => {
+    if (selectedView !== 'dashboard') return
+    let cancelled = false
+    ;(async () => {
+      setDbLoading(true)
+      try {
+        const [g, r] = await Promise.all([
+          apiFetch('/api/goals').then(res => res.json()).catch(() => []),
+          apiFetch('/api/analytics/reflections').then(res => res.json()).catch(() => [])
+        ])
+        if (!cancelled) { setDbGoals(Array.isArray(g) ? g : []); setDbReflections(Array.isArray(r) ? r : []) }
+      } catch { if (!cancelled) { setDbGoals([]); setDbReflections([]) } }
+      finally { if (!cancelled) setDbLoading(false) }
+    })()
+    return () => { cancelled = true }
+  }, [selectedView])
+
+  const goalsKpi = useMemo(() => {
+    return { total: (dbGoals?.length || 0), onTrack: 0, offTrack: 0 }
+  }, [dbGoals])
+
+  const recentStageItems = useMemo(() => {
+    const entries = Object.keys(stageLabels || {}) as string[]
+    return entries.slice(0, 8).map((id) => ({ id, title: (stageLabels as any)[id] || id }))
+  }, [stageLabels])
+
+  const sentimentData = useMemo(() => {
+    const counts: Record<string, number> = {}
+    for (const r of (dbReflections || [])) {
+      const s = r.inferredLeadSentiment || '—'
+      counts[s] = (counts[s] || 0) + 1
+    }
+    const entries = Object.entries(counts).sort((a,b)=>b[1]-a[1]).slice(0,6)
+    const colors = ['#10b981','#f59e0b','#ef4444','#6366f1','#06b6d4','#84cc16']
+    return entries.map(([name, value], idx) => ({ name, value, fill: colors[idx % colors.length] }))
+  }, [dbReflections])
+
+  // Auto-check when entering Dashboard view
+  // WPPConnect auto-check removed
 
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event
@@ -122,11 +192,6 @@ export default function KommoCRM() {
     return matchesSearch && matchesStatus && matchesResp && matchesSource && minOk && maxOk
   })
 
-  // Labels do pipeline
-  const [stageLabels, setStageLabels] = useState<Record<string, string>>({})
-  const [isEditStagesOpen, setIsEditStagesOpen] = useState(false)
-  const [savingStages, setSavingStages] = useState(false)
-
   // Construir lista de estágios aplicando labels customizados
   const pipelineStages = useMemo(() => {
     // defaults com labels aplicados
@@ -147,6 +212,25 @@ export default function KommoCRM() {
   })
   const totalPipelineValue = stageStats.reduce((sum, s) => sum + s.value, 0)
   const totalPipelineCount = filteredLeads.length
+
+  // Prefetch AI scores when sorting enabled
+  useEffect(() => {
+    if (!sortByAi) return
+    let cancelled = false
+    ;(async () => {
+      const ids = leads.map(l => l.id)
+      const next: Record<string, number> = {}
+      for (const id of ids) {
+        try {
+          const r = await apiFetch(`/api/leads/ai-score?lead_id=${encodeURIComponent(id)}`)
+          const js = await r.json().catch(() => ({} as any))
+          if (r.ok && typeof js?.score === 'number') next[id] = js.score
+        } catch {}
+      }
+      if (!cancelled) setAiScoreMap(next)
+    })()
+    return () => { cancelled = true }
+  }, [sortByAi, leads])
 
   const handleCreateLead = (formData: FormData) => {
     const newLeadData = {
@@ -531,7 +615,7 @@ export default function KommoCRM() {
   }
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen bg-background/80">
       <div className="h-screen flex">
         <CRMSidebar 
           selectedView={selectedView}
@@ -542,273 +626,38 @@ export default function KommoCRM() {
 
         {/* Main Content */}
         <div className="flex-1 flex flex-col">
-          {/* Header */}
-          <div className="h-16 bg-card border-b border-border flex items-center justify-between px-6 shadow-sm">
-            <div className="flex items-center space-x-4">
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-                className="hover:bg-primary/10"
-              >
-                <MoreHorizontal className="h-4 w-4" />
-              </Button>
-              <h1 className="text-xl font-semibold text-foreground">
-                {selectedView === "pipeline" ? "Pipeline de Vendas" : 
-                 selectedView === "dashboard" ? "Dashboard" : 
-                 selectedView === "contacts" ? "Contatos" : 
-                 selectedView === "settings" ? "Configurações" : ""}
-              </h1>
-            </div>
-
-            <div className="flex items-center space-x-4">
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  placeholder="Buscar leads, contatos..."
-                  className="pl-9 w-64 bg-input border-border"
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                />
-              </div>
-              
-              <Select value={filterStatus} onValueChange={setFilterStatus}>
-                <SelectTrigger className="w-40">
-                  <Filter className="h-4 w-4 mr-2" />
-                  <SelectValue placeholder="Filtrar" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">Todos</SelectItem>
-                  <SelectItem value="new">Novos</SelectItem>
-                  <SelectItem value="qualified">Qualificados</SelectItem>
-                  <SelectItem value="proposal">Proposta</SelectItem>
-                  <SelectItem value="negotiation">Negociação</SelectItem>
-                  <SelectItem value="closed-won">Fechados</SelectItem>
-                  <SelectItem value="closed-lost">Perdidos</SelectItem>
-                </SelectContent>
-              </Select>
-              
-               {role !== 'sales' && (
-               <Dialog open={isCreateModalOpen} onOpenChange={setIsCreateModalOpen}>
-                <DialogTrigger asChild>
-                  <Button size="sm" className="bg-primary text-primary-foreground hover:bg-primary/90 shadow-primary">
-                    <Plus className="h-4 w-4 mr-2" />
-                    Novo Lead
-                  </Button>
-                </DialogTrigger>
-                <DialogContent className="max-w-2xl">
-                  <DialogHeader>
-                    <DialogTitle>Criar Novo Lead</DialogTitle>
-                  </DialogHeader>
-                  <form onSubmit={(e) => {
-                    e.preventDefault()
-                    const formData = new FormData(e.currentTarget)
-                    handleCreateLead(formData)
-                  }} className="space-y-4">
-                    <div className="grid grid-cols-2 gap-4">
-                      <div>
-                        <Label htmlFor="name">Nome *</Label>
-                        <Input id="name" name="name" required />
-                      </div>
-                      <div>
-                        <Label htmlFor="company">Empresa *</Label>
-                        <Input id="company" name="company" required />
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-2 gap-4">
-                      <div>
-                        <Label htmlFor="email">Email</Label>
-                        <Input id="email" name="email" type="email" />
-                      </div>
-                      <div>
-                        <Label htmlFor="phone">Telefone</Label>
-                        <Input id="phone" name="phone" />
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-3 gap-4">
-                      <div>
-                        <Label htmlFor="value">Valor (R$) *</Label>
-                        <Input id="value" name="value" type="number" required />
-                      </div>
-                      <div>
-                        <Label htmlFor="status">Status *</Label>
-                        <Select name="status" defaultValue={pendingCreateStatus || pipelineStages[0]?.id || 'new'}>
-                          <SelectTrigger>
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {pipelineStages.map(s => (
-                              <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <div>
-                        <Label htmlFor="responsible">Responsável *</Label>
-                        <Input id="responsible" name="responsible" placeholder="Nome do responsável" required />
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-2 gap-4">
-                      <div>
-                        <Label htmlFor="source">Origem *</Label>
-                        <Input id="source" name="source" placeholder="Ex.: Website, WhatsApp, Email" required />
-                      </div>
-                      <div>
-                        <Label htmlFor="tags">Tags (separadas por vírgula)</Label>
-                        <Input id="tags" name="tags" placeholder="premium, hot, enterprise" />
-                      </div>
-                    </div>
-                    <div>
-                      <Label htmlFor="notes">Observações</Label>
-                      <Textarea id="notes" name="notes" rows={3} />
-                    </div>
-                    <div className="flex justify-end space-x-2">
-                      <Button type="button" variant="outline" onClick={() => setIsCreateModalOpen(false)}>
-                        Cancelar
-                      </Button>
-                      <Button type="submit" disabled={isCreating}>
-                        {isCreating ? "Criando..." : "Criar Lead"}
-                      </Button>
-                    </div>
-                  </form>
-                </DialogContent>
-               </Dialog>
-               )}
-
-              <Dialog open={isBulkCreateOpen} onOpenChange={setIsBulkCreateOpen}>
-                <DialogContent className="max-w-2xl">
-                  <DialogHeader>
-                    <DialogTitle>Criar vários leads</DialogTitle>
-                    <DialogDescription>Informe um lead por linha. Campos: Nome | Empresa | Telefone | Email | Valor. O status será "{pendingCreateStatus || 'new'}".</DialogDescription>
-                  </DialogHeader>
-                  <form onSubmit={async (e) => {
-                    e.preventDefault()
-                    const form = e.currentTarget as HTMLFormElement
-                    const textarea = form.elements.namedItem('bulk') as HTMLTextAreaElement
-                    const lines = (textarea.value || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean)
-                    const created: any[] = []
-                    for (const line of lines) {
-                      const [name='', company='', phone='', email='', valueStr='0'] = line.split('|').map(s => s.trim())
-                      try {
-                        await createLead({
-                          name: name || 'Lead',
-                          company: company || '—',
-                          value: Number(valueStr || 0),
-                          status: (pendingCreateStatus as any) || 'new',
-                          responsible: user?.user_metadata?.full_name || '—',
-                          source: 'bulk',
-                          tags: [],
-                          email: email || null,
-                          phone: phone || null,
-                        } as any)
-                        created.push(name || company || phone || 'Lead')
-                      } catch {}
-                    }
-                    setIsBulkCreateOpen(false)
-                    toast({ title: 'Leads criados', description: `${created.length} lead(s) adicionados em ${pendingCreateStatus || 'new'}.` })
-                  }} className="space-y-3">
-                    <Textarea name="bulk" rows={10} placeholder={"Exemplos:\nMaria Silva | ACME | 11999999999 | maria@ex.com | 5000\nCarlos Lima | Beta Ltda | 11988887777 |  | 3000"} />
-                    <DialogFooter>
-                      <Button type="button" variant="outline" onClick={() => setIsBulkCreateOpen(false)}>Cancelar</Button>
-                      <Button type="submit">Criar</Button>
-                    </DialogFooter>
-                  </form>
-                </DialogContent>
-              </Dialog>
-
-              {/* Adicionar novo estágio */}
-              <Dialog open={isAddStageOpen} onOpenChange={setIsAddStageOpen}>
-                <DialogContent className="max-w-md">
-                  <DialogHeader>
-                    <DialogTitle>Novo estágio do pipeline</DialogTitle>
-                    <DialogDescription>Defina um identificador e um nome exibido. O identificador será usado internamente nos leads.</DialogDescription>
-                  </DialogHeader>
-                  <form onSubmit={async (e) => {
-                    e.preventDefault()
-                    if (!orgId) return
-                    const id = (newStageId || '').trim().toLowerCase().replace(/\s+/g, '-')
-                    const name = (newStageName || '').trim()
-                    if (!id || !name) return
-                    try {
-                      // Merge stageLabels e adiciona o novo
-                      const next = { ...stageLabels, [id]: name }
-                      const payload = { organization_id: orgId, stageLabels: next }
-                      const r = await apiFetch('/api/org/pipeline/config', {
-                        method: 'POST', headers: { 'Content-Type': 'application/json', ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}) }, body: JSON.stringify(payload)
-                      })
-                      if (!r.ok) throw new Error('Falha ao salvar estágio')
-                      setStageLabels(next)
-                      setIsAddStageOpen(false)
-                    } catch {}
-                  }} className="space-y-3">
-                    <div>
-                      <Label htmlFor="stage-id">Identificador</Label>
-                      <Input id="stage-id" value={newStageId} onChange={(e) => setNewStageId(e.target.value)} placeholder="ex: follow-up" />
-                    </div>
-                    <div>
-                      <Label htmlFor="stage-name">Nome</Label>
-                      <Input id="stage-name" value={newStageName} onChange={(e) => setNewStageName(e.target.value)} placeholder="Ex.: Follow up" />
-                    </div>
-                    <DialogFooter>
-                      <Button type="button" variant="outline" onClick={() => setIsAddStageOpen(false)}>Cancelar</Button>
-                      <Button type="submit">Adicionar</Button>
-                    </DialogFooter>
-                  </form>
-                </DialogContent>
-              </Dialog>
-
-              <div className="flex items-center gap-2">
-                <Badge variant="outline" className="uppercase text-[10px]">{role || '...'}</Badge>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={handleSignOut}
-                  className="hover:bg-destructive/10 text-destructive"
-                >
-                  <LogOut className="h-4 w-4 mr-2" />
-                  Sair
-                </Button>
-                {(orgRole === 'admin' || orgRole === 'manager') && selectedView === 'pipeline' && (
-                  <>
-                    <Button variant="outline" size="sm" onClick={() => setIsEditStagesOpen(true)} className="ml-2">Editar estágios</Button>
-                    <Button variant="outline" size="sm" onClick={() => { setNewStageId(''); setNewStageName(''); setIsAddStageOpen(true) }}>Adicionar estágio</Button>
-                  </>
-                )}
-              </div>
-            </div>
-          </div>
 
           {/* Content based on selected view */}
           {selectedView === "pipeline" && (
             <div className="flex-1 p-6 overflow-auto">
               {/* KPI agregado */}
               <div className="mb-4 grid grid-cols-3 gap-4">
-                <Card>
+                <Card className="shadow-none border-border/50">
                   <CardContent className="p-4 text-center">
-                    <div className="text-xs text-muted-foreground">Leads no pipeline</div>
-                    <div className="text-2xl font-bold text-primary">{totalPipelineCount}</div>
+                    <div className="text-[11px] text-foreground/60 tracking-wide uppercase">Leads no pipeline</div>
+                    <div className="text-[28px] font-semibold text-foreground">{totalPipelineCount}</div>
                   </CardContent>
                 </Card>
-                <Card>
+                <Card className="shadow-none border-border/50">
                   <CardContent className="p-4 text-center">
-                    <div className="text-xs text-muted-foreground">Valor total</div>
-                    <div className="text-2xl font-bold text-success">R$ {totalPipelineValue.toLocaleString('pt-BR')}</div>
+                    <div className="text-[11px] text-foreground/60 tracking-wide uppercase">Valor total</div>
+                    <div className="text-[28px] font-semibold text-foreground">R$ {totalPipelineValue.toLocaleString('pt-BR')}</div>
                   </CardContent>
                 </Card>
-                <Card>
+                <Card className="shadow-none border-border/50">
                   <CardContent className="p-4 text-center">
-                    <div className="text-xs text-muted-foreground">Ticket médio</div>
-                    <div className="text-2xl font-bold text-foreground">R$ {(totalPipelineCount ? (totalPipelineValue/totalPipelineCount) : 0).toLocaleString('pt-BR')}</div>
+                    <div className="text-[11px] text-foreground/60 tracking-wide uppercase">Ticket médio</div>
+                    <div className="text-[28px] font-semibold text-foreground">R$ {(totalPipelineCount ? (totalPipelineValue/totalPipelineCount) : 0).toLocaleString('pt-BR')}</div>
                   </CardContent>
                 </Card>
               </div>
               {/* Quick Filters */}
-              <Card className="mb-4">
-                <CardContent className="p-4 grid grid-cols-1 md:grid-cols-5 gap-3">
+              <Card className="mb-4 bg-secondary/70 backdrop-blur-md border-none rounded-xl shadow-[0_10px_30px_-20px_hsl(var(--foreground)/0.24)]">
+                <CardContent className="p-5 grid grid-cols-1 md:grid-cols-5 gap-4">
                   <div className="md:col-span-2">
-                    <Label className="text-xs">Responsável</Label>
+                    <Label className="text-[11px] text-foreground/70">Responsável</Label>
                     <Select value={filterResponsible} onValueChange={setFilterResponsible}>
-                      <SelectTrigger className="h-9">
+                      <SelectTrigger className="h-10 rounded-lg bg-background/30 hover:bg-background/40 border-border/40 focus-visible:ring-0 focus-visible:ring-offset-0">
                         <SelectValue placeholder="Todos" />
                       </SelectTrigger>
                       <SelectContent>
@@ -820,9 +669,9 @@ export default function KommoCRM() {
                     </Select>
                   </div>
                   <div className="md:col-span-2">
-                    <Label className="text-xs">Origem</Label>
+                    <Label className="text-[11px] text-foreground/70">Origem</Label>
                     <Select value={filterSource} onValueChange={setFilterSource}>
-                      <SelectTrigger className="h-9">
+                      <SelectTrigger className="h-10 rounded-lg bg-background/30 hover:bg-background/40 border-border/40 focus-visible:ring-0 focus-visible:ring-offset-0">
                         <SelectValue placeholder="Todas" />
                       </SelectTrigger>
                       <SelectContent>
@@ -833,16 +682,19 @@ export default function KommoCRM() {
                       </SelectContent>
                     </Select>
                   </div>
-                  <div className="flex items-end gap-2">
+                  <div className="flex items-end gap-3">
                     <div>
-                      <Label className="text-xs">Valor mín</Label>
-                      <Input value={minValue} onChange={(e) => setMinValue(e.target.value)} type="number" className="h-9" />
+                      <Label className="text-[11px] text-foreground/70">Valor mín</Label>
+                      <Input value={minValue} onChange={(e) => setMinValue(e.target.value)} type="number" className="h-10 rounded-lg bg-background/30 hover:bg-background/40 border-border/40 focus-visible:ring-0 focus-visible:ring-offset-0" />
                     </div>
                     <div>
-                      <Label className="text-xs">Valor máx</Label>
-                      <Input value={maxValue} onChange={(e) => setMaxValue(e.target.value)} type="number" className="h-9" />
+                      <Label className="text-[11px] text-foreground/70">Valor máx</Label>
+                      <Input value={maxValue} onChange={(e) => setMaxValue(e.target.value)} type="number" className="h-10 rounded-lg bg-background/30 hover:bg-background/40 border-border/40 focus-visible:ring-0 focus-visible:ring-offset-0" />
                     </div>
-                    <Button variant="outline" className="ml-auto h-9" onClick={() => { setFilterResponsible("all"); setFilterSource("all"); setMinValue(""); setMaxValue(""); }}>Limpar</Button>
+                    <Button variant="outline" className="ml-auto h-10 rounded-lg border-border/40" onClick={() => { setFilterResponsible("all"); setFilterSource("all"); setMinValue(""); setMaxValue(""); }}>Limpar</Button>
+                    <Button variant={sortByAi ? "default" : "outline"} className="h-10 rounded-lg border-border/40" onClick={() => setSortByAi(v => !v)}>
+                      {sortByAi ? 'Ordenando por AI' : 'Ordenar por AI Score'}
+                    </Button>
                   </div>
                 </CardContent>
               </Card>
@@ -862,7 +714,12 @@ export default function KommoCRM() {
                     <PipelineStage 
                       key={stage.id} 
                       stage={stage} 
-                      leads={filteredLeads.filter(l => l.status === stage.id)}
+                      leads={(function() {
+                        const stageLeads = filteredLeads.filter(l => l.status === stage.id)
+                        if (!sortByAi) return stageLeads
+                        const sorted = [...stageLeads].sort((a, b) => (Number(aiScoreMap[b.id] ?? -1) - Number(aiScoreMap[a.id] ?? -1)))
+                        return sorted
+                      })()}
                       onViewLead={(lead) => {
                         setSelectedLead(lead)
                         setIsDetailsModalOpen(true)
@@ -908,87 +765,65 @@ export default function KommoCRM() {
 
           {/* Dashboard View */}
           {selectedView === "dashboard" && (
-            <div className="flex-1 p-6 overflow-auto">
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-6">
-                <Card className="bg-gradient-card border-border shadow-card hover:shadow-glow transition-all duration-300 animate-slide-up">
-                  <CardHeader>
-                    <CardTitle className="text-sm font-medium text-muted-foreground">Total de Leads</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-3xl font-bold text-primary">{stats.total}</div>
-                    {Number.isFinite(stats.trends?.totalDeltaPct) && (
-                      <p className={`text-xs ${stats.trends.totalDeltaPct >= 0 ? 'text-success' : 'text-destructive'}`}>
-                        {stats.trends.totalDeltaPct >= 0 ? '+' : ''}{stats.trends.totalDeltaPct.toFixed(1)}% {stats.trends.periodLabel}
-                      </p>
-                    )}
-                  </CardContent>
-                </Card>
+            <DashboardShell title="Dashboard" onImportClick={() => {}}>
+              {/* Quick actions row */}
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <QuickActionCard icon={<Sparkles className="h-4 w-4" />} title={`Resumo Inteligente`} description={<span className="text-muted-foreground text-xs">{/* @ts-ignore */}<SmartSummary stats={stats} /></span> as any} actionLabel="Abrir" onClick={() => setSmartSummaryOpen(true)} />
+                <QuickActionCard icon={<ListChecks className="h-4 w-4" />} title="Follow‑up Inteligente" description="Priorize leads por probabilidade" onClick={() => setSelectedView('followup')} />
+                <QuickActionCard icon={<BarChart3 className="h-4 w-4" />} title="Ranking (AI Score)" description="Leads ordenados por AI" onClick={() => setSelectedView('ranking')} />
+                <QuickActionCard icon={<Target className="h-4 w-4" />} title="Metas do Agente" description="Acompanhe seu progresso" onClick={() => setSelectedView('goals')} />
+              </div>
 
-                <Card className="bg-gradient-card border-border shadow-card hover:shadow-glow transition-all duration-300 animate-slide-up">
-                  <CardHeader>
-                    <CardTitle className="text-sm font-medium text-muted-foreground">Taxa de Conversão</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-3xl font-bold text-primary">{stats.conversionRate.toFixed(1)}%</div>
-                    {Number.isFinite(stats.trends?.conversionDeltaPp) && (
-                      <p className={`text-xs ${stats.trends.conversionDeltaPp >= 0 ? 'text-success' : 'text-destructive'}`}>
-                        {stats.trends.conversionDeltaPp >= 0 ? '+' : ''}{stats.trends.conversionDeltaPp.toFixed(1)} pp {stats.trends.periodLabel}
-                      </p>
-                    )}
-                  </CardContent>
+              {/* KPI mini cards */}
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <Card className="card-spotlight card-tilt card-gradient-border p-4">
+                  <div className="text-xs text-muted-foreground">Total de Leads</div>
+                  <div className="text-2xl font-semibold text-primary mt-1">{stats.total}</div>
                 </Card>
-
-                <Card className="bg-gradient-card border-border shadow-card hover:shadow-glow transition-all duration-300 animate-slide-up">
-                  <CardHeader>
-                    <CardTitle className="text-sm font-medium text-muted-foreground">Valor Total</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-3xl font-bold text-primary">R$ {stats.totalValue.toLocaleString('pt-BR')}</div>
-                    {Number.isFinite(stats.trends?.totalValueDeltaPct) && (
-                      <p className={`text-xs ${stats.trends.totalValueDeltaPct >= 0 ? 'text-success' : 'text-destructive'}`}>
-                        {stats.trends.totalValueDeltaPct >= 0 ? '+' : ''}{stats.trends.totalValueDeltaPct.toFixed(1)}% {stats.trends.periodLabel}
-                      </p>
-                    )}
-                  </CardContent>
+                <Card className="card-spotlight card-tilt card-gradient-border p-4">
+                  <div className="text-xs text-muted-foreground">Taxa de Conversão</div>
+                  <div className="text-2xl font-semibold text-primary mt-1">{stats.conversionRate.toFixed(1)}%</div>
                 </Card>
-
-                <Card className="bg-gradient-card border-border shadow-card hover:shadow-glow transition-all duration-300 animate-slide-up">
-                  <CardHeader>
-                    <CardTitle className="text-sm font-medium text-muted-foreground">Deals Fechados</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-3xl font-bold text-primary">{stats.byStatus['closed-won']}</div>
-                    {Number.isFinite(stats.trends?.closedWonDeltaPct) && (
-                      <p className={`text-xs ${stats.trends.closedWonDeltaPct >= 0 ? 'text-success' : 'text-destructive'}`}>
-                        {stats.trends.closedWonDeltaPct >= 0 ? '+' : ''}{stats.trends.closedWonDeltaPct.toFixed(1)}% {stats.trends.periodLabel}
-                      </p>
-                    )}
-                  </CardContent>
+                <Card className="card-spotlight card-tilt card-gradient-border p-4">
+                  <div className="text-xs text-muted-foreground">Valor Total</div>
+                  <div className="text-2xl font-semibold text-primary mt-1">R$ {stats.totalValue.toLocaleString('pt-BR')}</div>
+                </Card>
+                <Card className="card-spotlight card-tilt card-gradient-border p-4">
+                  <div className="text-xs text-muted-foreground">Deals Fechados</div>
+                  <div className="text-2xl font-semibold text-primary mt-1">{stats.byStatus['closed-won']}</div>
                 </Card>
               </div>
 
-              {/* Recent Activity */}
-              <Card className="bg-gradient-card border-border shadow-card">
-                <CardHeader>
-                  <CardTitle className="text-foreground">Atividades Recentes</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="space-y-4">
-                    {leads.slice(0, 5).map((lead) => (
-                      <div key={lead.id} className="flex items-center justify-between py-2 border-b border-border last:border-0">
+              {/* Recent grid */}
+              <RecentGrid title="Atalhos Recentes" items={recentStageItems} onSelect={() => setSelectedView('pipeline')} />
+
+              {/* Table section */}
                         <div>
-                          <p className="text-sm font-medium text-foreground">{lead.name} - {lead.company}</p>
-                          <p className="text-xs text-muted-foreground">Status: {lead.status}</p>
+                <div className="text-sm font-medium text-foreground mb-3">Leads recentes</div>
+                <LeadsTable rows={leads.slice(0, 8).map(l => ({ id: l.id, name: l.name, company: l.company, value: l.value, status: l.status, responsible: l.responsible, updatedAt: (l as any).updated_at }))} />
                         </div>
-                        <div className="text-right">
-                          <span className="text-sm font-bold text-primary">R$ {lead.value.toLocaleString('pt-BR')}</span>
-                          <p className="text-xs text-muted-foreground">{lead.responsible}</p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </CardContent>
-              </Card>
+
+            </DashboardShell>
+          )}
+
+          {/* Ranking View */}
+          {selectedView === "ranking" && (
+            <div className="flex-1 p-6 overflow-auto">
+              <RankingView leads={leads} />
+            </div>
+          )}
+
+          {/* Follow-up View */}
+          {selectedView === "followup" && (
+            <div className="flex-1 p-6 overflow-auto">
+              <FollowupView />
+            </div>
+          )}
+
+          {/* Console (Agente) */}
+          {selectedView === "console" && (
+            <div className="flex-1 p-6 overflow-auto">
+              {/* AgentConsole removido */}
             </div>
           )}
 
@@ -1008,7 +843,7 @@ export default function KommoCRM() {
               
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {filteredLeads.map((lead, index) => (
-                  <Card key={lead.id} className="bg-gradient-card border-border shadow-card hover:shadow-glow transition-all duration-300 animate-slide-up group" style={{ animationDelay: `${index * 0.1}s` }}>
+                  <Card key={lead.id} className="border-border/60 shadow-none hover:shadow-card transition-all duration-300 animate-slide-up group" style={{ animationDelay: `${index * 0.1}s` }}>
                     <CardContent className="p-4">
                       <div className="flex justify-between items-start mb-3">
                         <div>
@@ -1084,6 +919,9 @@ export default function KommoCRM() {
                   </Card>
                 ))}
               </div>
+
+              {/* Pipeline Health */}
+              <PipelineHealthSection />
             </div>
           )}
 
@@ -1133,12 +971,21 @@ export default function KommoCRM() {
             <SettingsView />
           )}
 
+          {/* Goals View */}
+          {selectedView === "goals" && (
+            <div className="flex-1 p-6 overflow-auto">
+              <GoalsPage />
+            </div>
+          )}
+
           
 
           {/* Employees View */}
           {selectedView === "employees" && (
             <EmployeesView />
           )}
+
+          
 
           {/* Settings View removida */}
 
@@ -1150,7 +997,7 @@ export default function KommoCRM() {
                 <p className="text-muted-foreground">Gerencie suas comunicações</p>
               </div>
               
-              <Card className="bg-gradient-card border-border shadow-card">
+              <Card className="border-border/50 shadow-none">
                 <CardHeader>
                   <CardTitle className="text-foreground">Em Desenvolvimento</CardTitle>
                 </CardHeader>
@@ -1172,7 +1019,7 @@ export default function KommoCRM() {
       </div>
 
       {/* Quick WhatsApp Chat Modal */}
-      <QuickChat leadId={selectedChatLeadId || undefined} open={isQuickChatOpen} onOpenChange={setIsQuickChatOpen} />
+      <QuickChat leadId={selectedChatLeadId || undefined} open={isQuickChatOpen} onOpenChange={setIsQuickChatOpen} prefillText={quickChatPrefill} autoSend={quickChatAutoSend} />
 
       {/* Agent Command Modal */}
       <Dialog open={agentModalOpen} onOpenChange={setAgentModalOpen}>
@@ -1263,6 +1110,87 @@ export default function KommoCRM() {
                   <p className="text-sm bg-muted p-3 rounded-md">{selectedLead.notes}</p>
                 </div>
               )}
+              {/* Perfil IA (via Agente) */}
+              <div className="rounded-md border p-3">
+                <Label className="text-sm font-medium">Perfil IA</Label>
+                <div className="flex items-center gap-2 mb-2">
+                  <Button size="sm" variant="outline" onClick={async () => {
+                    try {
+                      if (!selectedLead?.phone) return
+                      await apiFetch('/api/agent/lead-profile/refresh', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone: selectedLead.phone }) })
+                      toast({ title: 'Perfil atualizado', description: 'Análise via IA concluída.' })
+                    } catch (e: any) {
+                      toast({ title: 'Erro', description: String(e?.message || e), variant: 'destructive' })
+                    }
+                  }}>Atualizar perfil via IA</Button>
+                  <Button size="sm" onClick={async () => {
+                    try {
+                      const phoneDigits = String(selectedLead?.phone || '').replace(/\D/g, '')
+                      const r = await apiFetch(`/api/agent/precall?${phoneDigits ? `phone=${encodeURIComponent(phoneDigits)}` : ''}`)
+                      const js = await r.json().catch(() => ({} as any))
+                      const q = Array.isArray(js?.suggestedQuestions) && js.suggestedQuestions[0] ? String(js.suggestedQuestions[0]) : null
+                      if (!q) { toast({ title: 'Sem sugestão', description: 'Nenhuma pergunta sugerida no momento.' }); return }
+                      try { await navigator.clipboard.writeText(q) } catch {}
+                      toast({ title: 'Sugestão pronta', description: q })
+                    } catch (e: any) {
+                      toast({ title: 'Falha na Próx. Ação', description: String(e?.message || e), variant: 'destructive' })
+                    }
+                  }}>Próx. Ação</Button>
+                  {/* Pedir ao Agente: sugere texto e oferece 3 opções */}
+                  <Button size="sm" variant="default" onClick={async () => {
+                    try {
+                      if (!selectedLead?.id) return
+                      setSuggestLoading(true)
+                      setSuggestText('')
+                      const r = await apiFetch('/api/agent/suggest-followup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lead_id: selectedLead.id }) })
+                      const js = await r.json().catch(() => ({} as any))
+                      const txt = String(js?.sugestao || '').trim()
+                      if (!txt) { toast({ title: 'Sem sugestão', description: 'O agente não retornou texto.' }); return }
+                      setSuggestText(txt)
+                      toast({ title: 'Sugestão pronta', description: txt })
+                    } catch (e: any) {
+                      toast({ title: 'Erro ao sugerir follow‑up', description: String(e?.message || e), variant: 'destructive' })
+                    } finally { setSuggestLoading(false) }
+                  }}>{suggestLoading ? 'Gerando…' : 'Pedir ao Agente'}</Button>
+                </div>
+                <AILeadProfile phone={selectedLead.phone} />
+                {suggestText && (
+                  <div className="mt-3 border-t pt-3">
+                    <Label className="text-sm font-medium">Sugestão de Follow‑up</Label>
+                    <div className="mt-2 p-2 rounded-md bg-muted text-sm whitespace-pre-wrap">{suggestText}</div>
+                    <div className="flex flex-wrap gap-2 mt-3">
+                      <Button size="sm" variant="default" onClick={() => {
+                        // Criar tarefa
+                        if (!selectedLead?.id) return
+                        createActivity({ lead_id: selectedLead.id, type: 'task', title: 'Follow‑up', description: suggestText, completed: false } as any, {
+                          onSuccess: () => toast({ title: 'Tarefa criada', description: 'Follow‑up salvo como tarefa.' }),
+                          onError: (e: any) => toast({ title: 'Erro', description: String(e?.message || e), variant: 'destructive' })
+                        })
+                      }}>Criar tarefa</Button>
+                      <Button size="sm" variant="secondary" onClick={() => {
+                        // Enviar agora pelo WhatsApp
+                        if (!selectedLead?.id) return
+                        setSelectedChatLeadId(selectedLead.id)
+                        setQuickChatPrefill(suggestText)
+                        setQuickChatAutoSend(true)
+                        setIsQuickChatOpen(true)
+                      }}>Enviar agora pelo WhatsApp</Button>
+                      <Button size="sm" variant="outline" onClick={() => {
+                        // Salvar como nota
+                        if (!selectedLead?.id) return
+                        createActivity({ lead_id: selectedLead.id, type: 'note', title: 'Insight do Agente', description: suggestText, completed: false } as any, {
+                          onSuccess: () => toast({ title: 'Nota salva', description: 'Insight salvo na timeline.' }),
+                          onError: (e: any) => toast({ title: 'Erro', description: String(e?.message || e), variant: 'destructive' })
+                        })
+                      }}>Salvar como nota</Button>
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div className="rounded-md border p-3">
+                <Label className="text-sm font-medium">Lead AI Score</Label>
+                <AILeadScore leadId={selectedLead.id} />
+              </div>
               {/* Timeline resumida: últimas 5 atividades/comunicações/propostas */}
               <div>
                 <Label className="text-sm font-medium">Timeline</Label>
@@ -1405,6 +1333,479 @@ export default function KommoCRM() {
           </form>
         </DialogContent>
       </Dialog>
+
+      {/* Smart Summary Modal (Large) */}
+      <Dialog open={smartSummaryOpen} onOpenChange={setSmartSummaryOpen}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Resumo Inteligente</DialogTitle>
+            <DialogDescription>Geração de resumo executivo e foco do dia</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+              <Card className="p-4"><div className="text-xs text-muted-foreground">Total de Leads</div><div className="text-2xl font-semibold">{stats.total}</div></Card>
+              <Card className="p-4"><div className="text-xs text-muted-foreground">Conversão</div><div className="text-2xl font-semibold">{stats.conversionRate.toFixed(1)}%</div></Card>
+              <Card className="p-4"><div className="text-xs text-muted-foreground">Valor Total</div><div className="text-2xl font-semibold">R$ {stats.totalValue.toLocaleString('pt-BR')}</div></Card>
+              <Card className="p-4"><div className="text-xs text-muted-foreground">Won</div><div className="text-2xl font-semibold">{stats.byStatus['closed-won']}</div></Card>
+            </div>
+            <Textarea value={smartSummaryText} onChange={e => setSmartSummaryText(e.target.value)} placeholder="Clique em Gerar para obter o resumo" rows={8} />
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setSmartSummaryOpen(false)}>Fechar</Button>
+              <Button disabled={smartSummaryBusy} onClick={async () => {
+                try {
+                  setSmartSummaryBusy(true)
+                  const payload = { periodLabel: 'últimos 7 dias', numbers: { newLeads: stats.total, proposals: stats.byStatus['proposal'] || 0, negotiations: stats.byStatus['negotiation'] || 0, won: stats.byStatus['closed-won'] || 0, lost: stats.byStatus['closed-lost'] || 0 } }
+                  const r = await apiFetch('/api/dashboard/summary', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+                  const js = await r.json().catch(() => ({} as any))
+                  const txt = String(js?.text || '').trim()
+                  setSmartSummaryText(txt || 'Sem texto gerado.')
+                } catch (e: any) {
+                  setSmartSummaryText(`Falha ao gerar resumo: ${String(e?.message || e)}`)
+                } finally { setSmartSummaryBusy(false) }
+              }}>{smartSummaryBusy ? 'Gerando…' : 'Gerar'}</Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}
+
+// Lightweight AI profile viewer
+function AILeadProfile({ phone }: { phone: string | null }) {
+  const { toast } = useToast();
+  const [loading, setLoading] = useState(false);
+  const [data, setData] = useState<any | null>(null);
+
+  useEffect(() => {
+    if (!phone) { setData(null); return; }
+    let aborted = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const r = await apiFetch(`/api/agent/lead-profile?phone=${encodeURIComponent(phone)}`);
+        const js = await r.json().catch(() => ({}));
+        if (!aborted) setData(r.ok ? js : null);
+        if (!r.ok && !aborted) toast({ title: 'Perfil IA indisponível', description: String(js?.error || r.statusText || '—'), variant: 'destructive' });
+      } catch (e: any) {
+        if (!aborted) toast({ title: 'Erro', description: String(e?.message || e), variant: 'destructive' });
+      } finally { if (!aborted) setLoading(false); }
+    })();
+    return () => { aborted = true; };
+  }, [phone]);
+
+  if (!phone) return <p className="text-xs text-muted-foreground">Telefone ausente.</p>;
+  if (loading) return <p className="text-xs text-muted-foreground">Carregando…</p>;
+  if (!data) return <p className="text-xs text-muted-foreground">Sem dados do agente.</p>;
+
+  const pains = Array.isArray(data.pains) ? data.pains : (Array.isArray(data.principaisDores) ? data.principaisDores : []);
+  const tags = Array.isArray(data.tags) ? data.tags : [];
+  const interests = Array.isArray(data.interests) ? data.interests : [];
+  const emotionalState = data.emotionalState || data.estadoEmocional || null;
+  const emotionalConfidence = typeof data.emotionalConfidence === 'number' ? data.emotionalConfidence : null;
+
+  return (
+    <div className="mt-2 grid grid-cols-2 gap-3 text-sm">
+      <div>
+        <div className="text-xs text-muted-foreground">Negócio</div>
+        <div>{data.businessName || data.nomeDoNegocio || '—'}</div>
+      </div>
+      <div>
+        <div className="text-xs text-muted-foreground">Tipo</div>
+        <div>{data.businessType || data.tipoDeNegocio || '—'}</div>
+      </div>
+      <div className="col-span-2">
+        <div className="text-xs text-muted-foreground">Dor principal</div>
+        <div>{pains[0] || '—'}</div>
+      </div>
+      <div className="col-span-2">
+        <div className="text-xs text-muted-foreground">Resumo</div>
+        <div className="bg-muted p-2 rounded-md">{data.lastSummary || data.ultimoResumoDaSituacao || '—'}</div>
+      </div>
+      <div>
+        <div className="text-xs text-muted-foreground">Estado emocional</div>
+        <div>{emotionalState ? `${emotionalState}${emotionalConfidence != null ? ` (${Math.round(emotionalConfidence*100)}%)` : ''}` : '—'}</div>
+      </div>
+      {interests.length > 0 && (
+        <div className="col-span-2">
+          <div className="text-xs text-muted-foreground">Interesses</div>
+          <div className="flex flex-wrap gap-1">
+            {interests.slice(0,6).map((t: string) => (<Badge key={t} variant="secondary" className="text-[10px]">{t}</Badge>))}
+          </div>
+        </div>
+      )}
+      {tags.length > 0 && (
+        <div className="col-span-2">
+          <div className="text-xs text-muted-foreground">Tags IA</div>
+          <div className="flex flex-wrap gap-1">
+            {tags.slice(0,8).map((t: string) => (<Badge key={t} variant="outline" className="text-[10px]">{t}</Badge>))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AILeadScore({ leadId }: { leadId: string }) {
+  const { toast } = useToast();
+  const [loading, setLoading] = useState(false);
+  const [data, setData] = useState<{ score: number; bucket: string; reasons: string[] } | null>(null);
+
+  useEffect(() => {
+    if (!leadId) { setData(null); return; }
+    let aborted = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const r = await apiFetch(`/api/leads/ai-score?lead_id=${encodeURIComponent(leadId)}`);
+        const js = await r.json().catch(() => ({}));
+        if (!aborted) setData(r.ok ? js : null);
+        if (!r.ok && !aborted) toast({ title: 'AI Score indisponível', description: String(js?.error || r.statusText || '—'), variant: 'destructive' });
+      } catch (e: any) {
+        if (!aborted) toast({ title: 'Erro', description: String(e?.message || e), variant: 'destructive' });
+      } finally { if (!aborted) setLoading(false); }
+    })();
+    return () => { aborted = true; };
+  }, [leadId]);
+
+  if (loading) return <p className="text-xs text-muted-foreground">Carregando…</p>;
+  if (!data) return <p className="text-xs text-muted-foreground">Sem score.</p>;
+  return (
+    <div className="mt-2 text-sm space-y-2">
+      <div className="flex items-center gap-2">
+        <Badge variant="secondary">{data.bucket}</Badge>
+        <div className="font-semibold">{data.score}/100</div>
+      </div>
+      {Array.isArray(data.reasons) && data.reasons.length > 0 && (
+        <ul className="list-disc list-inside text-xs text-muted-foreground">
+          {data.reasons.slice(0,3).map((r, i) => (<li key={i}>{r}</li>))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function RankingView({ leads }: { leads: any[] }) {
+  const { toast } = useToast();
+  const [loading, setLoading] = useState(false);
+  const [rows, setRows] = useState<Array<{ id: string; name: string; company: string; phone: string | null; status: string; score: number; bucket: string }>>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const out: any[] = [];
+        for (const l of leads) {
+          try {
+            const r = await apiFetch(`/api/leads/ai-score?lead_id=${encodeURIComponent(l.id)}`);
+            const js = await r.json().catch(() => ({} as any));
+            if (r.ok && typeof js?.score === 'number') {
+              out.push({ id: l.id, name: l.name, company: l.company, phone: l.phone || null, status: l.status, score: js.score, bucket: js.bucket || '-' });
+            } else {
+              out.push({ id: l.id, name: l.name, company: l.company, phone: l.phone || null, status: l.status, score: -1, bucket: '-' });
+            }
+          } catch {
+            out.push({ id: l.id, name: l.name, company: l.company, phone: l.phone || null, status: l.status, score: -1, bucket: '-' });
+          }
+        }
+        out.sort((a, b) => (b.score - a.score));
+        if (!cancelled) setRows(out);
+      } catch (e: any) {
+        if (!cancelled) toast({ title: 'Erro', description: String(e?.message || e), variant: 'destructive' });
+      } finally { if (!cancelled) setLoading(false); }
+    })();
+    return () => { cancelled = true };
+  }, [leads]);
+
+  return (
+    <div className="space-y-3">
+      {loading && <p className="text-sm text-muted-foreground">Carregando ranking…</p>}
+      <div className="grid grid-cols-6 gap-2 text-xs text-muted-foreground">
+        <div>Lead</div>
+        <div>Empresa</div>
+        <div>Status</div>
+        <div>Telefone</div>
+        <div>Bucket</div>
+        <div>Score</div>
+      </div>
+      <div className="space-y-1">
+        {rows.map(r => (
+          <div key={r.id} className="grid grid-cols-6 gap-2 items-center text-sm border-b border-border/40 py-2">
+            <div className="truncate">{r.name}</div>
+            <div className="truncate">{r.company}</div>
+            <div><Badge variant="outline" className="text-[10px]">{r.status}</Badge></div>
+            <div className="truncate text-xs text-muted-foreground">{r.phone || '—'}</div>
+            <div><Badge variant="secondary" className="text-[10px]">{r.bucket}</Badge></div>
+            <div className="font-semibold">{r.score >= 0 ? `${r.score}/100` : '—'}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SmartSummary({ stats }: { stats: any }) {
+  const [text, setText] = useState<string>('')
+  const [loading, setLoading] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      setLoading(true)
+      try {
+        const payload = {
+          periodLabel: 'últimos 7 dias',
+          numbers: {
+            newLeads: stats?.trends ? Math.max(0, Math.round(stats.trends.totalDeltaPct)) : 0,
+            proposals: stats?.byStatus?.proposal || 0,
+            negotiations: stats?.byStatus?.negotiation || 0,
+            won: stats?.byStatus?.['closed-won'] || 0,
+            lost: stats?.byStatus?.['closed-lost'] || 0,
+          }
+        }
+        const r = await apiFetch('/api/dashboard/summary', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+        const js = await r.json().catch(() => ({}))
+        if (!cancelled) setText(js?.text || '')
+      } catch { if (!cancelled) setText('Resumo indisponível no momento.') }
+      finally { if (!cancelled) setLoading(false) }
+    })()
+    return () => { cancelled = true }
+  }, [stats?.total, stats?.trends?.totalDeltaPct, stats?.byStatus?.proposal, stats?.byStatus?.negotiation, stats?.byStatus?.['closed-won'], stats?.byStatus?.['closed-lost']])
+  return (
+    <div className="text-sm">
+      {loading ? <span className="text-muted-foreground">Gerando resumo…</span> : (text || <span className="text-muted-foreground">—</span>)}
+    </div>
+  )
+}
+
+function PipelineHealthSection() {
+  const { orgId } = useOrg();
+  const { toast } = useToast();
+  const [loading, setLoading] = useState(false);
+  const [data, setData] = useState<{ stages: any[]; avgScore: number; rebalance: string[] } | null>(null);
+
+  useEffect(() => {
+    if (!orgId) return
+    let cancelled = false
+    ;(async () => {
+      setLoading(true)
+      try {
+        const r = await apiFetch(`/api/pipeline/health?organization_id=${encodeURIComponent(orgId)}`)
+        const js = await r.json().catch(() => ({} as any))
+        if (!cancelled) setData(r.ok ? js : null)
+        if (!r.ok && !cancelled) toast({ title: 'Health indisponível', description: String(js?.error || r.statusText || '—'), variant: 'destructive' })
+      } catch (e: any) {
+        if (!cancelled) toast({ title: 'Erro', description: String(e?.message || e), variant: 'destructive' })
+      } finally { if (!cancelled) setLoading(false) }
+    })()
+    return () => { cancelled = true }
+  }, [orgId])
+
+  if (loading) return <p className="text-sm text-muted-foreground">Calculando saúde do pipeline…</p>
+  if (!data) return null
+
+  return (
+    <div className="mt-6">
+      <div className="mb-2 text-sm text-muted-foreground">Health do Pipeline (heurístico)</div>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {data.stages.map((s: any) => (
+          <Card key={s.stage} className="bg-card border-border/50">
+            <CardHeader>
+              <CardTitle className="text-sm">{s.stage}</CardTitle>
+            </CardHeader>
+            <CardContent className="text-sm space-y-1">
+              <div>Leads: {s.count}</div>
+              <div>Idade média: {s.avgAgeDays} dias</div>
+              <div>Resp. 3d: {s.responseRate}%</div>
+              <div>Valor: R$ {Number(s.totalValue||0).toLocaleString('pt-BR')}</div>
+              <div>Score: {s.score}/100</div>
+              {Array.isArray(s.suggestions) && s.suggestions.length > 0 && (
+                <ul className="list-disc list-inside text-xs text-muted-foreground">
+                  {s.suggestions.slice(0,2).map((t: string, i: number) => (<li key={i}>{t}</li>))}
+                </ul>
+              )}
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+      {Array.isArray(data.rebalance) && data.rebalance.length > 0 && (
+        <div className="mt-3 text-xs text-muted-foreground">Reequilíbrio sugerido: {data.rebalance.join('; ')}</div>
+      )}
+    </div>
+  )
+}
+
+function FollowupView() {
+  const { orgId } = useOrg();
+  const { toast } = useToast();
+  const [loading, setLoading] = useState(false);
+  const [items, setItems] = useState<Array<{ id: string; name: string; company: string; phone: string | null; status: string; value: number; probability: number; suggestion: string; emotion?: string | null; profile?: string | null; breakdown?: { ai: number; recency: number; value: number; stage: number; hotTag: number; agentSignals?: number; bonusStage: number; total: number } }>>([]);
+  const [minProb, setMinProb] = useState<number>(0);
+  const [statusFilter, setStatusFilter] = useState<string>('all');
+  const { createActivity } = useActivities();
+
+  useEffect(() => {
+    if (!orgId) return
+    let cancelled = false
+    ;(async () => {
+      setLoading(true)
+      try {
+        const r = await apiFetch(`/api/followup/queue?organization_id=${encodeURIComponent(orgId)}`)
+        const js = await r.json().catch(() => ({} as any))
+        if (!cancelled) setItems(r.ok ? (js?.items || []) : [])
+        if (!r.ok && !cancelled) toast({ title: 'Follow-up indisponível', description: String(js?.error || r.statusText || '—'), variant: 'destructive' })
+      } catch (e: any) {
+        if (!cancelled) toast({ title: 'Erro', description: String(e?.message || e), variant: 'destructive' })
+      } finally { if (!cancelled) setLoading(false) }
+    })()
+    return () => { cancelled = true }
+  }, [orgId])
+
+  const filtered = items.filter(it => it.probability >= minProb && (statusFilter === 'all' || it.status === statusFilter))
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-end gap-3">
+        <div>
+          <Label className="text-[11px] text-foreground/70">Prob. mínima</Label>
+          <Input type="number" value={minProb} onChange={(e) => setMinProb(Number(e.target.value || 0))} className="h-9 w-28 bg-background/60 border-sidebar-border" />
+        </div>
+        <div>
+          <Label className="text-[11px] text-foreground/70">Status</Label>
+          <Select value={statusFilter} onValueChange={setStatusFilter}>
+            <SelectTrigger className="h-9 bg-background/60 border-sidebar-border"><SelectValue placeholder="Todos" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">Todos</SelectItem>
+              <SelectItem value="qualified">qualified</SelectItem>
+              <SelectItem value="proposal">proposal</SelectItem>
+              <SelectItem value="negotiation">negotiation</SelectItem>
+              <SelectItem value="closed-won">closed-won</SelectItem>
+              <SelectItem value="closed-lost">closed-lost</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+      {loading ? (
+        <div className="space-y-2">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <div key={i} className="grid grid-cols-11 gap-2 items-center">
+              <Skeleton className="h-5" />
+              <Skeleton className="h-5" />
+              <Skeleton className="h-5" />
+              <Skeleton className="h-5" />
+              <Skeleton className="h-5" />
+              <Skeleton className="h-3 col-span-2" />
+              <Skeleton className="h-5 col-span-2" />
+              <Skeleton className="h-8" />
+              <Skeleton className="h-5" />
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="space-y-1 rounded-md border border-sidebar-border/60">
+          <div className="grid grid-cols-11 gap-2 text-xs text-muted-foreground sticky top-0 bg-secondary/80 backdrop-blur px-2 py-2 border-b border-sidebar-border/60">
+            <div>Lead</div>
+            <div>Empresa</div>
+            <div>Status</div>
+            <div>Telefone</div>
+            <div>Valor</div>
+            <div>Prob.</div>
+            <div>Breakdown</div>
+            <div>Ações</div>
+            <div>Sugestão</div>
+            <div>Sinais</div>
+          </div>
+          {filtered.map(it => (
+            <div key={it.id} className="grid grid-cols-11 gap-2 items-center text-sm px-2 py-2 border-b border-border/30 hover:bg-muted/40 transition-colors">
+              <div className="truncate">{it.name}</div>
+              <div className="truncate">{it.company}</div>
+              <div><Badge variant="outline" className="text-[10px]">{it.status}</Badge></div>
+              <div className="truncate text-xs text-muted-foreground">{it.phone || '—'}</div>
+              <div className="whitespace-nowrap">R$ {Number(it.value||0).toLocaleString('pt-BR')}</div>
+              <div className="space-y-1">
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <div className="cursor-help">
+                        <div className="text-xs font-medium">{it.probability}%</div>
+                        <Progress value={it.probability} className={
+                          `h-2 ${it.probability>=75 ? 'bg-green-200' : it.probability>=50 ? 'bg-yellow-200' : 'bg-red-200'}`
+                        } />
+                      </div>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <div className="text-xs space-y-1">
+                        <div><span className="text-muted-foreground">AI:</span> {it.breakdown?.ai ?? '—'}%</div>
+                        <div><span className="text-muted-foreground">Recência:</span> {it.breakdown?.recency ?? '—'}%</div>
+                        <div><span className="text-muted-foreground">Valor:</span> {it.breakdown?.value ?? '—'}%</div>
+                        <div><span className="text-muted-foreground">Estágio:</span> {it.breakdown?.stage ?? '—'}%</div>
+                        <div><span className="text-muted-foreground">Hot tag:</span> {it.breakdown?.hotTag ?? '—'}%</div>
+                        <div><span className="text-muted-foreground">Sinais agente:</span> {it.breakdown?.agentSignals ?? '—'}%</div>
+                        <div><span className="text-muted-foreground">Bônus estágio:</span> {it.breakdown?.bonusStage ?? '—'}%</div>
+                        <div className="mt-1 font-medium">Total: {it.breakdown?.total ?? '—'}%</div>
+                      </div>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              </div>
+              <div className="text-xs text-muted-foreground truncate">
+                {it.breakdown ? (
+                  <div className="flex gap-1 flex-wrap">
+                    <Badge variant="secondary" className="text-[10px]">AI {it.breakdown.ai}%</Badge>
+                    <Badge variant="secondary" className="text-[10px]">Rec {it.breakdown.recency}%</Badge>
+                    <Badge variant="secondary" className="text-[10px]">Val {it.breakdown.value}%</Badge>
+                    <Badge variant="secondary" className="text-[10px]">Est {it.breakdown.stage}%</Badge>
+                    {(it.breakdown.hotTag ?? 0) > 0 && <Badge variant="outline" className="text-[10px]">Hot +{it.breakdown.hotTag}%</Badge>}
+                    {typeof it.breakdown.agentSignals === 'number' && it.breakdown.agentSignals !== 0 && (
+                      <Badge variant={it.breakdown.agentSignals > 0 ? 'default' : 'destructive'} className="text-[10px]">
+                        Agente {it.breakdown.agentSignals > 0 ? '+' : ''}{it.breakdown.agentSignals}%
+                      </Badge>
+                    )}
+                    {(it.breakdown.bonusStage ?? 0) > 0 && <Badge variant="outline" className="text-[10px]">Bônus +{it.breakdown.bonusStage}%</Badge>}
+                  </div>
+                ) : '—'}
+              </div>
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" onClick={() => {
+                  (window as any).crmAgent?.selectLead?.({ leadId: it.id, openDetails: true })
+                }}>
+                  <Eye className="h-3.5 w-3.5 mr-1" /> Abrir
+                </Button>
+                <Button variant="default" size="sm" onClick={async () => {
+                  try {
+                    const res = await (window as any).crmAgent?.dispatchIntent?.('create_task', { leadId: it.id, title: 'Follow-up', description: `Follow-up para ${it.name}` })
+                    if (!res?.ok) throw new Error(res?.error || 'Falha ao criar tarefa')
+                  } catch {}
+                }}>
+                  <CheckSquare className="h-3.5 w-3.5 mr-1" /> Tarefa
+                </Button>
+                <Button variant="secondary" size="sm" onClick={async () => {
+                  try {
+                    const phoneDigits = String(it.phone || '').replace(/\D/g, '')
+                    const r = await apiFetch(`/api/agent/precall?${phoneDigits ? `phone=${encodeURIComponent(phoneDigits)}` : ''}`)
+                    const js = await r.json().catch(() => ({} as any))
+                    const q = Array.isArray(js?.suggestedQuestions) && js.suggestedQuestions[0] ? String(js.suggestedQuestions[0]) : null
+                    if (!q) { toast({ title: 'Sem sugestão', description: 'Nenhuma pergunta sugerida no momento.' }); return }
+                    try { await navigator.clipboard.writeText(q) } catch {}
+                    toast({ title: 'Sugestão pronta', description: q })
+                  } catch (e: any) {
+                    toast({ title: 'Falha na Próx. Ação', description: String(e?.message || e), variant: 'destructive' })
+                  }
+                }}>
+                  <Send className="h-3.5 w-3.5 mr-1" /> Próx. Ação
+                </Button>
+              </div>
+              <div className="text-xs text-muted-foreground truncate" title={it.suggestion}>{it.suggestion}</div>
+              <div className="text-xs">
+                <div className="flex gap-1 flex-wrap">
+                  {it.emotion && <Badge variant="outline" className="text-[10px]">{it.emotion}</Badge>}
+                  {it.profile && <Badge variant="outline" className="text-[10px]">{it.profile}</Badge>}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

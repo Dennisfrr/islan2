@@ -470,3 +470,47 @@ CREATE TRIGGER on_auth_user_created
 -- ==========================================
 -- Seed removido. Use a aplicação para criar dados iniciais.
 
+
+-- ==========================================
+-- TABELA: FOLLOW-UP INSIGHTS (CRM)
+-- ==========================================
+CREATE TABLE IF NOT EXISTS public.followup_insights (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    organization_id UUID REFERENCES public.organizations(id) NOT NULL,
+    lead_id UUID REFERENCES public.leads(id),
+    lead_wa_id TEXT, -- ex.: 5511999999999@c.us
+    priority INTEGER CHECK (priority BETWEEN 1 AND 5) NOT NULL DEFAULT 3,
+    insight JSONB NOT NULL, -- pacote com sentimento, emocao, intencao, motivos, evidencias, recomendacao etc.
+    created_by UUID REFERENCES auth.users NOT NULL DEFAULT auth.uid(),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+ALTER TABLE public.followup_insights ENABLE ROW LEVEL SECURITY;
+
+-- Org members podem ler insights da própria organização
+CREATE POLICY "Org members can view followup insights" ON public.followup_insights
+FOR SELECT USING (
+  EXISTS (
+    SELECT 1 FROM public.organization_members m
+    WHERE m.user_id = auth.uid() AND m.organization_id = followup_insights.organization_id
+  )
+);
+
+-- Org members podem inserir insights para sua organização
+CREATE POLICY "Org members can insert followup insights" ON public.followup_insights
+FOR INSERT WITH CHECK (
+  EXISTS (
+    SELECT 1 FROM public.organization_members m
+    WHERE m.user_id = auth.uid() AND m.organization_id = followup_insights.organization_id
+  )
+);
+
+-- Opcional: apenas criador ou admin pode deletar
+CREATE POLICY "Creator or org admin can delete followup insights" ON public.followup_insights
+FOR DELETE USING (
+  created_by = auth.uid() OR EXISTS (
+    SELECT 1 FROM public.organization_members m
+    WHERE m.user_id = auth.uid() AND m.organization_id = followup_insights.organization_id AND m.role IN ('admin','manager')
+  )
+);
+

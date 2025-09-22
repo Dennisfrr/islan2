@@ -1,15 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-// import { Input } from '@/components/ui/input'
-// import { Label } from '@/components/ui/label'
 // import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
 import { useAuth } from '@/components/auth/AuthProvider'
 import { useLeads } from '@/hooks/useLeads'
 import { useOrg } from '@/components/org/OrgProvider'
 import { useToast } from '@/hooks/use-toast'
-import { Loader2, PlugZap, Phone, Send } from 'lucide-react'
+import { Loader2 } from 'lucide-react'
 import { WhatsAppSidebar } from '@/components/crm/WhatsApp/Sidebar'
 import { WhatsAppChat } from '@/components/crm/WhatsApp/Chat'
 import { useCommunications, type Communication } from '@/hooks/useCommunications'
@@ -87,6 +84,8 @@ export function WhatsAppView({ initialLeadId }: { initialLeadId?: string }) {
     return () => window.removeEventListener('message', onMessage)
   }, [])
 
+  // Login via WhatsApp removed
+
   // Realtime: ao receber uma comunicação inbound de WhatsApp na org, atualiza lista de leads e sugere seleção
   useEffect(() => {
     if (!orgId) return
@@ -119,17 +118,7 @@ export function WhatsAppView({ initialLeadId }: { initialLeadId?: string }) {
     }
   }, [leads, selectedLeadId, initialLeadId])
 
-  const handleConnect = async () => {
-    try {
-      if (isDemo) return
-      const r = await apiFetch('/auth/whatsapp/url', { headers: { ...authHeader } })
-      if (!r.ok) throw new Error('Falha ao iniciar OAuth do WhatsApp')
-      const { url } = await r.json()
-      window.open(url, 'whatsapp_oauth', 'width=600,height=800')
-    } catch (e) {
-      // noop
-    }
-  }
+  // OAuth WhatsApp login removed
 
   const handleSelectPhone = async (phone_number_id: string) => {
     setLoading(true)
@@ -250,30 +239,25 @@ export function WhatsAppView({ initialLeadId }: { initialLeadId?: string }) {
   }
 
   return (
-    <div className="flex-1 overflow-hidden bg-white dark:bg-[#111B21]">
+    <div className="flex-1 overflow-hidden bg-background">
       {/* Top bar estilo WhatsApp (informativo e ações) */}
-      <div className="h-12 px-4 flex items-center justify-between bg-[#F0F2F5] dark:bg-[#202C33] border-b border-border">
-        <div className="text-sm text-foreground dark:text-[#E9EDEF]">
+      <div className="h-12 px-4 flex items-center justify-between bg-secondary border-b border-sidebar-border">
+        <div className="text-sm text-foreground/70">
           {connected ? 'Conta conectada.' : 'Nenhuma conta conectada.'}
         </div>
         <div className="flex items-center gap-2">
           {connected ? (
-            <Button variant="outline" size="sm" onClick={() => setSyncModalOpen(true)} disabled={loading || !orgId}>
+            <Button variant="outline" size="sm" className="border-sidebar-border" onClick={() => setSyncModalOpen(true)} disabled={loading || !orgId}>
               {loading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
               Sincronizar contatos
             </Button>
-          ) : (
-            <Button onClick={handleConnect} disabled={loading}>
-              {loading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <PlugZap className="h-4 w-4 mr-2" />}
-              Conectar WhatsApp
-            </Button>
-          )}
+          ) : null}
         </div>
       </div>
 
       {/* Área principal — duas colunas sem cartões */}
       {connected && (
-        <div className="h-[calc(100vh-12rem)] min-h-[520px] flex bg-white dark:bg-[#111B21]">
+        <div className="h-[calc(100vh-12rem)] min-h-[520px] flex bg-background">
           <WhatsAppSidebar
             leads={leads}
             selectedLeadId={selectedLeadId}
@@ -311,6 +295,8 @@ export function WhatsAppView({ initialLeadId }: { initialLeadId?: string }) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* WhatsApp login removed */}
     </div>
   )
 } 

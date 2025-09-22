@@ -73,17 +73,17 @@ export function LeadCard({ lead, onView, onEdit, onDelete, onOpenChat }: LeadCar
 
   return (
     <div ref={setNodeRef} style={style} {...attributes} {...listeners}>
-      <Card className="hover:shadow-md transition-shadow">
+      <Card className="transition-transform hover:-translate-y-[1px] hover:shadow-card border-border/50">
         <CardContent className="p-3">
           <div className="flex justify-between items-start mb-2">
             <div className="flex-1 min-w-0">
-              <h4 className="font-medium text-foreground text-sm truncate">{lead.name}</h4>
-              <p className="text-xs text-muted-foreground truncate">{lead.company}</p>
+              <h4 className="text-[15px] font-semibold text-foreground truncate">{lead.name}</h4>
+              <p className="text-[12px] text-foreground/60 truncate">{lead.company}</p>
             </div>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onPointerDown={(e) => e.stopPropagation()}>
-                  <MoreHorizontal className="h-3 w-3" />
+                  <MoreHorizontal className="h-3.5 w-3.5" />
                 </Button>
               </DropdownMenuTrigger>
              <DropdownMenuContent align="end" className="w-48" onPointerDown={(e) => e.stopPropagation()}>
@@ -103,8 +103,9 @@ export function LeadCard({ lead, onView, onEdit, onDelete, onOpenChat }: LeadCar
             </DropdownMenu>
           </div>
 
+          <div className="my-2 h-px bg-border/40" />
           <div className="mb-2 flex items-center justify-between">
-            <p className="text-base font-semibold text-success">R$ {lead.value.toLocaleString('pt-BR')}</p>
+            <p className="text-[15px] font-semibold text-foreground">R$ {lead.value.toLocaleString('pt-BR')}</p>
             <Badge variant="outline" className="text-[10px] uppercase">{lead.status}</Badge>
           </div>
 
@@ -133,16 +134,16 @@ export function LeadCard({ lead, onView, onEdit, onDelete, onOpenChat }: LeadCar
                   }}
                   aria-label="Abrir chat do WhatsApp"
                 >
-                  <MessageCircle className="h-3 w-3" />
+                  <MessageCircle className="h-3.5 w-3.5" />
                 </Button>
               )}
               {lead.email && (
                 <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onPointerDown={(e) => e.stopPropagation()}>
-                  <Mail className="h-3 w-3" />
+                  <Mail className="h-3.5 w-3.5" />
                 </Button>
               )}
               <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onPointerDown={(e) => e.stopPropagation()}>
-                <Phone className="h-3 w-3" />
+                <Phone className="h-3.5 w-3.5" />
               </Button>
             </div>
             <span className="text-[10px] text-muted-foreground">

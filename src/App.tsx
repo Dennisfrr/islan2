@@ -1,3 +1,4 @@
+import React from "react";
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -10,6 +11,13 @@ import { DealPreview } from "./pages/DealPreview";
 import Login from "./pages/Login";
 import NotFound from "./pages/NotFound";
 import ResetPassword from "./pages/ResetPassword";
+import AgentPage from "./pages/Agent";
+import GoalsPage from "./pages/Goals";
+import FollowupsPage from "./pages/Followups";
+import StrategiesPage from "./pages/Strategies";
+import StarfieldBackground from "@/components/background/Starfield";
+import GoalCoach from "@/components/goals/GoalCoach";
+import AgentChat from "@/components/crm/AgentChat";
 
 const queryClient = new QueryClient();
 
@@ -51,6 +59,46 @@ function AppRoutes() {
             </ProtectedRoute>
           } 
         />
+        <Route 
+          path="/agent" 
+          element={
+            <ProtectedRoute>
+              <OrgProvider>
+                <AgentPage />
+              </OrgProvider>
+            </ProtectedRoute>
+          }
+        />
+        <Route 
+          path="/goals" 
+          element={
+            <ProtectedRoute>
+              <OrgProvider>
+                <GoalsPage />
+              </OrgProvider>
+            </ProtectedRoute>
+          }
+        />
+        <Route 
+          path="/followups" 
+          element={
+            <ProtectedRoute>
+              <OrgProvider>
+                <FollowupsPage />
+              </OrgProvider>
+            </ProtectedRoute>
+          }
+        />
+        <Route 
+          path="/strategies" 
+          element={
+            <ProtectedRoute>
+              <OrgProvider>
+                <StrategiesPage />
+              </OrgProvider>
+            </ProtectedRoute>
+          }
+        />
         <Route path="/preview/deal/:id" element={<DealPreview />} />
         <Route path="*" element={<NotFound />} />
       </Routes>
@@ -62,8 +110,11 @@ const App = () => (
   <QueryClientProvider client={queryClient}>
     <AuthProvider>
       <TooltipProvider>
+        <StarfieldBackground />
         <Toaster />
         <Sonner />
+        <GlobalCoachMount />
+        <GlobalAgentChatMount />
         <AppRoutes />
       </TooltipProvider>
     </AuthProvider>
@@ -71,3 +122,33 @@ const App = () => (
 );
 
 export default App;
+
+function GlobalCoachMount() {
+  const [open, setOpen] = React.useState(false)
+  React.useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        setOpen(true)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+  return <GoalCoach open={open} onOpenChange={setOpen} />
+}
+
+function GlobalAgentChatMount() {
+  const [open, setOpen] = React.useState(false)
+  React.useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'j') {
+        e.preventDefault()
+        setOpen((v) => !v)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+  return <AgentChat open={open} onOpenChange={setOpen} />
+}

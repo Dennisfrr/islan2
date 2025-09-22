@@ -5,6 +5,10 @@ import morgan from 'morgan'
 import { createClient } from '@supabase/supabase-js'
 import crypto from 'crypto'
 import PDFDocument from 'pdfkit'
+import { fileURLToPath } from 'url'
+import fs from 'fs'
+import path from 'path'
+import { spawn } from 'child_process'
 
 const app = express()
 app.use(morgan('tiny'))
@@ -13,7 +17,58 @@ app.use('/webhooks', express.raw({ type: '*/*', limit: '2mb' }))
 // JSON parser for regular API endpoints
 app.use(express.json({ limit: '2mb' }))
 
+// __dirname shim for ESM
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+
 const PORT = process.env.PORT || 3000
+
+// Base do CRM para proxy de endpoints não presentes neste servidor
+const CRM_HTTP_BASE = process.env.CRM_HTTP_BASE || `http://localhost:${process.env.DASHBOARD_PORT_CRM || 3007}`
+const WA_AGENT_BASE = process.env.WA_AGENT_BASE_URL || `http://localhost:${process.env.WA_AGENT_PORT || process.env.DASHBOARD_PORT || 3005}`
+
+async function proxyToCRM(req, res, targetPath) {
+  try {
+    const url = `${String(CRM_HTTP_BASE).replace(/\/$/, '')}${targetPath}`
+    const headers = { 'Content-Type': req.headers['content-type'] || 'application/json' }
+    // Copia Authorization se houver
+    if (req.headers.authorization) headers['Authorization'] = req.headers.authorization
+    const init = { method: req.method, headers }
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      init.body = typeof req.body === 'string' ? req.body : JSON.stringify(req.body || {})
+    }
+    const r = await fetch(url, init)
+    const text = await r.text()
+    res.status(r.status)
+    try { res.type(r.headers.get('content-type') || 'application/json') } catch {}
+    return res.send(text)
+  } catch (e) {
+    console.error('[proxyToCRM] error', e)
+    return res.status(502).json({ error: 'bad_gateway' })
+  }
+}
+
+async function proxyToWA(req, res, targetPath) {
+  try {
+    const url = `${String(WA_AGENT_BASE).replace(/\/$/, '')}${targetPath}`
+    const headers = { 'Content-Type': req.headers['content-type'] || 'application/json' }
+    if (req.headers['x-agent-key']) headers['X-Agent-Key'] = req.headers['x-agent-key']
+    const envKey = process.env.WA_AGENT_KEY || process.env.CRM_AGENT_KEY || process.env.AGENT_API_KEY
+    if (envKey && !headers['X-Agent-Key']) headers['X-Agent-Key'] = String(envKey)
+    const init = { method: req.method, headers }
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      init.body = typeof req.body === 'string' ? req.body : JSON.stringify(req.body || {})
+    }
+    const r = await fetch(url, init)
+    const text = await r.text()
+    res.status(r.status)
+    try { res.type(r.headers.get('content-type') || 'application/json') } catch {}
+    return res.send(text)
+  } catch (e) {
+    console.error('[proxyToWA] error', e)
+    return res.status(502).json({ error: 'bad_gateway' })
+  }
+}
 const CORS_ORIGIN = process.env.CORS_ORIGIN || '*'
 const ALLOWED_ORIGINS = String(CORS_ORIGIN)
   .split(',')
@@ -40,6 +95,441 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 
 const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { autoRefreshToken: false, persistSession: false }
+})
+
+// ================================
+// Agent process manager (Agente WhatsaApp)
+// ================================
+let agentProcess = null
+let agentStartedAt = null
+let agentLastExit = { code: null, signal: null, at: null }
+
+function getAgentDir() {
+  // Agent folder is at project root, not under server/
+  return path.join(__dirname, '..', 'Agente WhatsaApp')
+}
+
+function isAgentRunning() {
+  return Boolean(agentProcess && !agentProcess.killed)
+}
+
+function getAgentHttpBase() {
+  const port = Number(process.env.AGENT_HTTP_PORT || process.env.DASHBOARD_PORT || 3101)
+  return `http://127.0.0.1:${port}`
+}
+
+app.get('/api/agent/status', async (req, res) => {
+  return res.json({ running: isAgentRunning(), pid: agentProcess?.pid || null, startedAt: agentStartedAt, lastExit: agentLastExit })
+})
+
+app.post('/api/agent/start', async (req, res) => {
+  try {
+    const user = await getUserFromAuthHeader(req)
+    if (!user?.id) return res.status(401).json({ error: 'unauthorized' })
+    if (isAgentRunning()) return res.json({ ok: true, alreadyRunning: true, pid: agentProcess.pid })
+    const cwd = getAgentDir()
+    if (!fs.existsSync(path.join(cwd, 'index.js'))) return res.status(500).json({ error: 'agent_index_not_found', cwd })
+    const env = { ...process.env }
+    if (!env.AGENT_HTTP_PORT) env.AGENT_HTTP_PORT = String(process.env.AGENT_HTTP_PORT || 3101)
+    agentProcess = spawn(process.execPath, ['index.js'], { cwd, env, stdio: 'pipe', windowsHide: true })
+    agentStartedAt = new Date().toISOString()
+    agentLastExit = { code: null, signal: null, at: null }
+    agentProcess.stdout?.on('data', d => { try { process.stdout.write(`[agent] ${d}`) } catch {} })
+    agentProcess.stderr?.on('data', d => { try { process.stderr.write(`[agent:err] ${d}`) } catch {} })
+    agentProcess.on('exit', (code, signal) => { agentLastExit = { code, signal, at: new Date().toISOString() } })
+    return res.json({ ok: true, pid: agentProcess.pid, startedAt: agentStartedAt })
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) })
+  }
+})
+
+// Proxy: emoção do lead do Agente (estado atual)
+app.get('/api/agent/lead-emotion', async (req, res) => {
+  try {
+    const user = await getUserFromAuthHeader(req)
+    if (!user?.id) return res.status(401).json({ error: 'unauthorized' })
+    const waId = String(req.query.waId || req.query.whatsapp_id || req.query.id || '')
+    const phone = String(req.query.phone || '').replace(/\D/g, '')
+    if (!waId && !phone) return res.status(400).json({ error: 'waId_or_phone_required' })
+    const id = waId || (phone ? `${phone}@c.us` : '')
+    const r = await fetch(`${getAgentHttpBase()}/api/leads/${encodeURIComponent(id)}/emotion`)
+    const j = await r.json().catch(() => ({}))
+    if (!r.ok) return res.status(r.status).json(j)
+    return res.json(j)
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) })
+  }
+})
+
+// Proxy: requisitar refresh assíncrono da emoção no Agente
+app.post('/api/agent/lead-emotion/refresh', async (req, res) => {
+  try {
+    const user = await getUserFromAuthHeader(req)
+    if (!user?.id) return res.status(401).json({ error: 'unauthorized' })
+    const waId = String(req.body?.waId || req.query?.waId || '')
+    const phone = String(req.body?.phone || req.query?.phone || '').replace(/\D/g, '')
+    if (!waId && !phone) return res.status(400).json({ error: 'waId_or_phone_required' })
+    const id = waId || (phone ? `${phone}@c.us` : '')
+    const r = await fetch(`${getAgentHttpBase()}/api/leads/${encodeURIComponent(id)}/emotion/refresh`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) })
+    const j = await r.json().catch(() => ({}))
+    if (!r.ok) return res.status(r.status).json(j)
+    return res.json(j)
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) })
+  }
+})
+
+// Proxy: Pré-call (últimas mensagens + 3 perguntas sugeridas)
+app.get('/api/agent/precall', async (req, res) => {
+  try {
+    const user = await getUserFromAuthHeader(req)
+    if (!user?.id) return res.status(401).json({ error: 'unauthorized' })
+    const waId = String(req.query.waId || req.query.whatsapp_id || req.query.id || '')
+    const phone = String(req.query.phone || '').replace(/\D/g, '')
+    if (!waId && !phone) return res.status(400).json({ error: 'waId_or_phone_required' })
+    const id = waId || (phone ? `${phone}@c.us` : '')
+    const r = await fetch(`${getAgentHttpBase()}/api/leads/${encodeURIComponent(id)}/precall`)
+    const j = await r.json().catch(() => ({}))
+    if (!r.ok) return res.status(r.status).json(j)
+    return res.json(j)
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) })
+  }
+})
+app.post('/api/agent/stop', async (req, res) => {
+  try {
+    const user = await getUserFromAuthHeader(req)
+    if (!user?.id) return res.status(401).json({ error: 'unauthorized' })
+    if (!isAgentRunning()) return res.json({ ok: true, alreadyStopped: true })
+    try { agentProcess.kill('SIGINT') } catch {}
+    setTimeout(() => { try { if (isAgentRunning()) agentProcess.kill('SIGKILL') } catch {} }, 2000)
+    return res.json({ ok: true })
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) })
+  }
+})
+
+// Proxy: Perfil do lead do Agente (via dashboard do agente)
+app.get('/api/agent/lead-profile', async (req, res) => {
+  try {
+    const user = await getUserFromAuthHeader(req)
+    if (!user?.id) return res.status(401).json({ error: 'unauthorized' })
+    const waId = String(req.query.waId || req.query.whatsapp_id || req.query.id || '')
+    const phone = String(req.query.phone || '').replace(/\D/g, '')
+    if (!waId && !phone) return res.status(400).json({ error: 'waId_or_phone_required' })
+    const id = waId || (phone ? `${phone}@c.us` : '')
+    const base = getAgentHttpBase()
+    const url = `${base}/api/leads/${encodeURIComponent(id)}`
+    const r = await fetch(url, { headers: {} })
+    const j = await r.json().catch(() => ({}))
+    if (!r.ok) return res.status(r.status).json(j)
+    return res.json(j)
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) })
+  }
+})
+
+// Proxy: disparar análise de perfil via agente (Gemini)
+app.post('/api/agent/lead-profile/refresh', async (req, res) => {
+  try {
+    const user = await getUserFromAuthHeader(req)
+    if (!user?.id) return res.status(401).json({ error: 'unauthorized' })
+    const waId = String(req.body?.waId || req.query?.waId || '')
+    const phone = String(req.body?.phone || req.query?.phone || '').replace(/\D/g, '')
+    if (!waId && !phone) return res.status(400).json({ error: 'waId_or_phone_required' })
+    const id = waId || (phone ? `${phone}@c.us` : '')
+    const r = await fetch(`${getAgentHttpBase()}/api/leads/${encodeURIComponent(id)}/analyze`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) })
+    const j = await r.json().catch(() => ({}))
+    if (!r.ok) return res.status(r.status).json(j)
+    return res.json({ ok: true, result: j })
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) })
+  }
+})
+
+// Sugestão de follow-up: gera um texto curto e objetivo para enviar ao lead
+app.post('/api/agent/suggest-followup', async (req, res) => {
+  try {
+    const user = await getUserFromAuthHeader(req)
+    if (!user?.id) return res.status(401).json({ error: 'unauthorized' })
+    const { lead_id } = req.body || {}
+    if (!lead_id) return res.status(400).json({ error: 'lead_id_required' })
+
+    const { data: lead } = await supabaseAdmin
+      .from('leads')
+      .select('*')
+      .eq('id', String(lead_id))
+      .maybeSingle()
+    if (!lead) return res.status(404).json({ error: 'lead_not_found' })
+
+    // Tenta obter perfil do agente por telefone para enriquecer contexto
+    let agentProfile = null
+    try {
+      const digits = String(lead.phone || '').replace(/\D/g, '')
+      if (digits) {
+        const r = await fetch(`${getAgentHttpBase()}/api/leads/${encodeURIComponent(digits + '@c.us')}`)
+        if (r.ok) agentProfile = await r.json().catch(() => null)
+      }
+    } catch {}
+
+    const apiKey = process.env.GEMINI_API_KEY
+    if (!apiKey) return res.status(500).json({ error: 'missing_gemini_key' })
+    const model = process.env.GEMINI_MODEL || 'gemini-1.5-flash'
+
+    const profile = {
+      nome: lead.name,
+      empresa: lead.company,
+      telefone: lead.phone,
+      valor: lead.value,
+      status: lead.status,
+      dores: agentProfile?.pains || agentProfile?.principaisDores || [],
+      resumo: agentProfile?.lastSummary || agentProfile?.ultimoResumoDaSituacao || null,
+      emocao: agentProfile?.emotionalState || null
+    }
+
+    const system = `Você é um assistente de CRM. Gere um texto curto e objetivo (máx. 400 caracteres) para follow-up por WhatsApp, em tom profissional e amigável. Use dados do perfil quando existir. Responda APENAS JSON no formato { sugestao: string, observacao?: string }.`
+    const contents = [
+      { role: 'user', parts: [{ text: system }] },
+      { role: 'user', parts: [{ text: `Perfil: ${JSON.stringify(profile)}` }] }
+    ]
+    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contents, generationConfig: { temperature: 0.3, maxOutputTokens: 200 } })
+    })
+    const js = await resp.json().catch(() => ({}))
+    if (!resp.ok) return res.status(502).json({ error: 'gemini_error', details: js })
+    const text = js?.candidates?.[0]?.content?.parts?.[0]?.text || ''
+    let parsed = null
+    try { parsed = JSON.parse(text) } catch { parsed = null }
+    const sugestao = String(parsed?.sugestao || parsed?.text || text || '').slice(0, 600)
+    const observacao = typeof parsed?.observacao === 'string' ? parsed.observacao : null
+
+    return res.json({ sugestao, observacao })
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) })
+  }
+})
+
+// Heurístico: AI Score do Lead (0-100) com bucket A/B/C
+const __aiScoreCache = new Map(); // key: lead_id -> { score, bucket, reasons, at }
+const __agentProfileCache = new Map(); // key: phoneDigits -> { emotionalState, decisionProfile, at }
+app.get('/api/leads/ai-score', async (req, res) => {
+  try {
+    const user = await getUserFromAuthHeader(req)
+    if (!user?.id) return res.status(401).json({ error: 'unauthorized' })
+    const leadId = String(req.query.lead_id || '')
+    if (!leadId) return res.status(400).json({ error: 'lead_id_required' })
+    const cache = __aiScoreCache.get(leadId)
+    const now = Date.now()
+    if (cache && (now - cache.at < 15 * 60 * 1000)) return res.json(cache)
+
+    // Carrega lead básico
+    const { data: lead } = await supabaseAdmin
+      .from('leads')
+      .select('*')
+      .eq('id', leadId)
+      .maybeSingle()
+    if (!lead) return res.status(404).json({ error: 'lead_not_found' })
+
+    // Busca perfil IA via agente (se tiver phone)
+    let profile = null
+    if (lead.phone) {
+      try {
+        const r = await fetch(`${getAgentHttpBase()}/api/leads/${encodeURIComponent(String(lead.phone).replace(/\D/g, '') + '@c.us')}`)
+        profile = await r.json().catch(() => null)
+      } catch {}
+    }
+
+    // Heurística simples
+    let score = 50
+    const reasons = []
+    const pain = (profile?.pains || profile?.principaisDores || [])[0]
+    const meeting = String(profile?.meetingInterest || profile?.nivelDeInteresseReuniao || '').toLowerCase()
+    const lastSummary = String(profile?.lastSummary || profile?.ultimoResumoDaSituacao || '')
+    const tags = Array.isArray(profile?.tags) ? profile.tags : []
+
+    if (meeting.includes('agend')) { score += 25; reasons.push('Interesse em reunião agendado') }
+    else if (meeting.includes('alto') || meeting.includes('sim')) { score += 15; reasons.push('Alto interesse declarado') }
+    if (pain) { score += 10; reasons.push(`Dor clara: ${pain}`) }
+    if (/proposta|orçamento|orcamento|valor/i.test(lastSummary)) { score += 10; reasons.push('Resumo menciona proposta/valor') }
+    if (tags.includes('hot-lead')) { score += 10; reasons.push('Tag hot-lead') }
+    score = Math.max(0, Math.min(100, score))
+    const bucket = score >= 80 ? 'A' : (score >= 65 ? 'B' : 'C')
+    const out = { score, bucket, reasons, at: now }
+    __aiScoreCache.set(leadId, out)
+    return res.json(out)
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) })
+  }
+})
+
+// Pipeline Health: métricas por coluna + recomendações simples
+app.get('/api/pipeline/health', async (req, res) => {
+  try {
+    const user = await getUserFromAuthHeader(req)
+    if (!user?.id) return res.status(401).json({ error: 'unauthorized' })
+    const orgId = String(req.query.organization_id || '')
+    if (!orgId) return res.status(400).json({ error: 'organization_id_required' })
+    // Puxa leads da org
+    const { data: leads } = await supabaseAdmin
+      .from('leads')
+      .select('id,status,value,updated_at,last_contact')
+      .eq('organization_id', orgId)
+    const byStage = new Map()
+    for (const l of (leads || [])) {
+      const s = String(l.status || 'new')
+      if (!byStage.has(s)) byStage.set(s, [])
+      byStage.get(s).push(l)
+    }
+    const now = Date.now()
+    const stages = Array.from(byStage.keys())
+    const out = stages.map((s) => {
+      const arr = byStage.get(s) || []
+      const count = arr.length
+      const avgAgeDays = count ? Math.round(arr.reduce((sum, l) => {
+        const ts = l.updated_at ? Date.parse(l.updated_at) : now
+        return sum + Math.max(0, (now - ts) / (1000*60*60*24))
+      }, 0) / count) : 0
+      const totalValue = arr.reduce((sum, l) => sum + Number(l.value || 0), 0)
+      // Proxy simples para “taxa de resposta” usando last_contact recência
+      const recent = arr.filter(l => l.last_contact && (now - Date.parse(l.last_contact)) < 3*24*60*60*1000).length
+      const responseRate = count ? Math.round((recent / count) * 100) : 0
+      // Score heurístico: maior é melhor
+      let score = 100
+      score -= Math.min(60, avgAgeDays) // mais velho, pior
+      score += Math.min(40, Math.round(totalValue / 1000)) // valor puxa score
+      score += Math.round(responseRate / 2) // até +50
+      score = Math.max(0, Math.min(100, score))
+      // Sugestões simples
+      const suggestions = []
+      if (avgAgeDays > 10) suggestions.push('Reduzir idade média: priorize follow-ups')
+      if (responseRate < 30) suggestions.push('Baixa resposta: revise copy ou cadência')
+      if (totalValue === 0 && count > 0) suggestions.push('Sem valor previsto: qualifique e estime')
+      return { stage: s, count, avgAgeDays, responseRate, totalValue, score, suggestions }
+    })
+    // Recomendações de reequilíbrio globais
+    const avgScore = out.length ? Math.round(out.reduce((a,b)=>a+b.score,0)/out.length) : 0
+    const weakest = out.slice().sort((a,b)=>a.score-b.score)[0] || null
+    const strongest = out.slice().sort((a,b)=>b.score-a.score)[0] || null
+    const rebalance = []
+    if (weakest && strongest && (strongest.score - weakest.score) > 25) {
+      rebalance.push(`Alocar tempo de ${strongest.stage} para ${weakest.stage}`)
+    }
+    return res.json({ stages: out, avgScore, rebalance })
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) })
+  }
+})
+
+// Follow-up inteligente: fila de leads quentes com prob. de fechamento
+app.get('/api/followup/queue', async (req, res) => {
+  try {
+    const user = await getUserFromAuthHeader(req)
+    if (!user?.id) return res.status(401).json({ error: 'unauthorized' })
+    const orgId = String(req.query.organization_id || '')
+    if (!orgId) return res.status(400).json({ error: 'organization_id_required' })
+    const { data: leads } = await supabaseAdmin
+      .from('leads')
+      .select('*')
+      .eq('organization_id', orgId)
+    const now = Date.now()
+    const out = []
+    for (const l of (leads || [])) {
+      const status = String(l.status || '')
+      // Pesos por estágio
+      const stageWeight = status === 'proposal' ? 0.9 : status === 'negotiation' ? 0.8 : status === 'qualified' ? 0.6 : 0.4
+      // AI score normalizado (0-1)
+      let ai = 0
+      try {
+        const cached = __aiScoreCache.get(String(l.id))
+        if (cached && (now - cached.at < 15*60*1000)) ai = Math.max(0, Math.min(1, Number(cached.score || 0)/100))
+      } catch {}
+      // Sinais do Agente (emoção/perfil) por telefone
+      let emotionalBoost = 0
+      let profileBoost = 0
+      let emotionLabel = null
+      let profileLabel = null
+      try {
+        const digits = String(l.phone || '').replace(/\D/g, '')
+        if (digits) {
+          let prof = __agentProfileCache.get(digits)
+          if (!prof || (now - prof.at > 10*60*1000)) {
+            try {
+              const r = await fetch(`${getAgentHttpBase()}/api/leads/${encodeURIComponent(digits + '@c.us')}`)
+              const j = await r.json().catch(() => null)
+              if (j) {
+                prof = {
+                  emotionalState: j.emotionalState || j.estadoEmocional || null,
+                  decisionProfile: j.decisionProfile || j.perfilDecisao || null,
+                  at: now,
+                }
+                __agentProfileCache.set(digits, prof)
+              }
+            } catch {}
+          }
+          if (prof) {
+            emotionLabel = prof.emotionalState || null
+            profileLabel = prof.decisionProfile || null
+            // micro-ajustes na probabilidade
+            if (typeof prof.emotionalState === 'string') {
+              const e = prof.emotionalState.toLowerCase()
+              if (/interessad|engajad/.test(e)) emotionalBoost += 0.05
+              if (/impacient|urgente/.test(e)) emotionalBoost += 0.03
+              if (/indiferent|frio/.test(e)) emotionalBoost -= 0.03
+            }
+            if (typeof prof.decisionProfile === 'string') {
+              const p = prof.decisionProfile.toLowerCase()
+              if (/urg|ráp/.test(p)) profileBoost += 0.03
+              if (/cétic|cetic/.test(p)) profileBoost -= 0.02
+            }
+          }
+        }
+      } catch {}
+      // Recência (0-1) com decaimento log: <24h≈1, 3d≈0.5, 7d≈0.2
+      let recency = 0.2
+      if (l.last_contact) {
+        const days = Math.max(0, (now - Date.parse(l.last_contact)) / (1000*60*60*24))
+        recency = Math.max(0, Math.min(1, 1 / Math.log2(days + 2)))
+      }
+      // Valor normalizado (cap em 20k): 0-1
+      const valueNorm = Math.max(0, Math.min(1, Number(l.value || 0) / 20000))
+      // Bônus sinais quentes
+      const hotTag = Array.isArray(l.tags) && l.tags.includes('hot-lead') ? 0.1 : 0
+      const bonusStage = status === 'proposal' ? 0.1 : (status === 'negotiation' ? 0.05 : 0)
+      // Combinação ponderada
+      const contribAi = 0.45 * ai
+      const contribRecency = 0.25 * recency
+      const contribValue = 0.20 * valueNorm
+      const contribStage = 0.10 * stageWeight
+      const contribAgentSignals = Math.max(-0.05, Math.min(0.08, emotionalBoost + profileBoost))
+      const contribBonuses = hotTag + bonusStage + contribAgentSignals
+      let p = 0
+      p += contribAi
+      p += contribRecency
+      p += contribValue
+      p += contribStage
+      p += contribBonuses
+      // clamp & escala para % com piso/teto
+      const prob = Math.max(5, Math.min(95, Math.round(p * 100)))
+      const suggestion = status === 'proposal' ? 'Enviar proposta refinada ou follow-up de decisão'
+        : status === 'negotiation' ? 'Agendar call de negociação com objeções'
+        : (ai > 0.75 ? 'Propor próxima etapa (proposta/call)' : 'Mensagem de descoberta e CTA claro')
+      const breakdown = {
+        ai: Math.round(contribAi * 100),
+        recency: Math.round(contribRecency * 100),
+        value: Math.round(contribValue * 100),
+        stage: Math.round(contribStage * 100),
+        hotTag: Math.round(hotTag * 100),
+        agentSignals: Math.round(contribAgentSignals * 100),
+        bonusStage: Math.round(bonusStage * 100),
+        total: Math.round((contribAi + contribRecency + contribValue + contribStage + hotTag + bonusStage + contribAgentSignals) * 100),
+      }
+      out.push({ id: l.id, name: l.name, company: l.company, phone: l.phone, status, value: l.value, probability: prob, suggestion, breakdown, emotion: emotionLabel, profile: profileLabel })
+    }
+    out.sort((a,b)=>b.probability-a.probability)
+    return res.json({ items: out.slice(0, 200) })
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) })
+  }
 })
 
 // Bridge: Agente WhatsApp -> CRM (intents diretas, autenticado por X-Agent-Key)
@@ -74,7 +564,7 @@ app.post('/api/agent/dispatch', async (req, res) => {
       const title = String(p.title || (type === 'task' ? 'Tarefa' : 'Nota'))
       const description = p.description ? String(p.description) : null
       const due_date = p.due_date ? new Date(p.due_date).toISOString() : null
-      const { error } = await supabaseAdmin.from('activities').insert([{
+      const { data: insertedActivity, error } = await supabaseAdmin.from('activities').insert([{
         lead_id: lead.id,
         user_id: ownerUserId,
         type,
@@ -83,9 +573,72 @@ app.post('/api/agent/dispatch', async (req, res) => {
         due_date,
         completed: false,
         organization_id: orgId,
-      }])
+      }]).select('id').maybeSingle()
       if (error) return res.status(500).json({ error: error.message })
-      return res.json({ ok: true })
+
+      // Auto-sugestão de follow-up e criação de follow-up (apenas para tarefas)
+      let followupResult = null
+      if (type === 'task') {
+        try {
+          // Monta waJid a partir do telefone do lead, se houver
+          const digits = String(lead.phone || '').replace(/\D/g, '')
+          const waJid = digits ? `${digits}@c.us` : null
+
+          // 1) Obter sugestão de follow-up via Agente WA (se disponível)
+          let suggestedText = null
+          if (waJid) {
+            try {
+              const base = getAgentHttpBase()
+              const key = process.env.WA_AGENT_KEY || process.env.CRM_AGENT_KEY || ''
+              const r = await fetch(`${base}/api/wa/followup/generate`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  ...(key ? { 'X-Agent-Key': key } : {}),
+                },
+                body: JSON.stringify({ leadId: waJid, objective: title, maxChars: 400 })
+              })
+              if (r.ok) {
+                const j = await r.json().catch(() => ({}))
+                if (j && typeof j.text === 'string' && j.text.trim()) {
+                  suggestedText = String(j.text).trim()
+                }
+              }
+            } catch {}
+          }
+
+          // 2) Criar follow-up no CRM (Agente CRM)
+          try {
+            const crmBase = process.env.CRM_HTTP_BASE || `http://localhost:${process.env.DASHBOARD_PORT_CRM || 3007}`
+            const nowMs = Date.now()
+            let scheduleInMinutes = undefined
+            if (due_date) {
+              const dueMs = new Date(due_date).getTime()
+              if (Number.isFinite(dueMs) && dueMs > nowMs) {
+                const diffMin = Math.ceil((dueMs - nowMs) / 60000)
+                if (diffMin > 0) scheduleInMinutes = diffMin
+              }
+            }
+            if (waJid) {
+              const body = {
+                leadId: waJid,
+                objective: String(suggestedText || title).slice(0, 420),
+                ...(scheduleInMinutes ? { scheduleInMinutes } : {}),
+                constraints: { maxChars: 420 },
+              }
+              const r2 = await fetch(`${crmBase}/api/followups`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+              })
+              const j2 = await r2.json().catch(() => ({}))
+              if (r2.ok) followupResult = j2
+            }
+          } catch {}
+        } catch {}
+      }
+
+      return res.json({ ok: true, taskId: insertedActivity?.id || null, followup: followupResult?.followup || null })
     }
 
     if (intent === 'update_lead') {
@@ -122,14 +675,157 @@ app.post('/api/agent/dispatch', async (req, res) => {
       return res.json({ ok: true })
     }
 
+    // Move lead entre estágios
+    if (intent === 'move_lead') {
+      const lead = await resolveLead({ lead_id: p.leadId || p.id, phone: p.phone, organization_id: p.organization_id })
+      if (!lead) return res.status(404).json({ error: 'lead_not_found' })
+      const toStageId = String(p.toStageId || p.status || '').trim()
+      if (!toStageId) return res.status(400).json({ error: 'invalid_params_toStageId' })
+      const { error } = await supabaseAdmin.from('leads').update({ status: toStageId, last_contact: new Date().toISOString() }).eq('id', lead.id)
+      if (error) return res.status(500).json({ error: error.message })
+      return res.json({ ok: true })
+    }
+
+    // Excluir lead
+    if (intent === 'delete_lead') {
+      const lead = await resolveLead({ lead_id: p.leadId || p.id, phone: p.phone, organization_id: p.organization_id })
+      if (!lead) return res.status(404).json({ error: 'lead_not_found' })
+      const { error } = await supabaseAdmin.from('leads').delete().eq('id', lead.id)
+      if (error) return res.status(500).json({ error: error.message })
+      return res.json({ ok: true })
+    }
+
+    // Criar vários leads em um estágio
+    if (intent === 'bulk_create_in_stage') {
+      const orgId = p.organization_id || null
+      if (!orgId) return res.status(400).json({ error: 'organization_id_required' })
+      const status = String(p.status || 'new')
+      const items = Array.isArray(p.items) ? p.items : []
+      const ownerUserId = await pickOrgOwnerUserId(orgId)
+      if (!ownerUserId) return res.status(400).json({ error: 'org_owner_not_found' })
+      const toInsert = items.slice(0, 200).map((it) => ({
+        name: String(it?.name || 'Lead'),
+        company: String(it?.company || '—'),
+        email: it?.email || null,
+        phone: it?.phone || null,
+        value: Number(it?.value || 0),
+        status,
+        responsible: String(it?.responsible || 'Agent'),
+        source: String(it?.source || 'bulk-agent'),
+        tags: Array.isArray(it?.tags) ? it.tags : [],
+        notes: it?.notes || null,
+        user_id: ownerUserId,
+        organization_id: orgId,
+      }))
+      if (!toInsert.length) return res.json({ ok: true, created: 0 })
+      const { error } = await supabaseAdmin.from('leads').insert(toInsert)
+      if (error) return res.status(500).json({ error: error.message })
+      return res.json({ ok: true, created: toInsert.length })
+    }
+
+    // Atualizar/Excluir atividade
+    if (intent === 'update_activity') {
+      const id = String(p.id || '')
+      if (!id) return res.status(400).json({ error: 'invalid_params_id' })
+      const updates = { ...p }
+      delete updates.id
+      const { error } = await supabaseAdmin.from('activities').update(updates).eq('id', id)
+      if (error) return res.status(500).json({ error: error.message })
+      return res.json({ ok: true })
+    }
+    if (intent === 'delete_activity') {
+      const id = String(p.id || '')
+      if (!id) return res.status(400).json({ error: 'invalid_params_id' })
+      const { error } = await supabaseAdmin.from('activities').delete().eq('id', id)
+      if (error) return res.status(500).json({ error: error.message })
+      return res.json({ ok: true })
+    }
+
+    // Deals CRUD
+    if (intent === 'create_deal') {
+      const orgId = p.organization_id || null
+      if (!orgId) return res.status(400).json({ error: 'organization_id_required' })
+      const ownerUserId = await pickOrgOwnerUserId(orgId)
+      if (!ownerUserId) return res.status(400).json({ error: 'org_owner_not_found' })
+      const payload = {
+        lead_id: p?.lead_id || p?.leadId || null,
+        title: String(p?.title || 'Proposta'),
+        description: p?.description ?? null,
+        status: String(p?.status || 'draft'),
+        valid_until: p?.valid_until ?? null,
+        organization_id: orgId,
+        user_id: ownerUserId,
+        total_value: 0,
+      }
+      const { data: deal, error } = await supabaseAdmin.from('deals').insert([payload]).select('*').single()
+      if (error) return res.status(500).json({ error: error.message })
+      // itens opcionais
+      const items = Array.isArray(p?.items) ? p.items : []
+      if (items.length) {
+        const toInsert = items.map((it) => ({
+          deal_id: deal.id,
+          product_id: it?.product_id ?? null,
+          product_name: String(it?.product_name || 'Item'),
+          quantity: Number(it?.quantity || 1),
+          unit_price: Number(it?.unit_price || 0),
+          total_price: Number(it?.quantity || 1) * Number(it?.unit_price || 0),
+        }))
+        const { error: iErr } = await supabaseAdmin.from('deal_items').insert(toInsert)
+        if (iErr) return res.status(500).json({ error: iErr.message })
+        const total = toInsert.reduce((s, it) => s + Number(it.total_price), 0)
+        await supabaseAdmin.from('deals').update({ total_value: total }).eq('id', deal.id)
+      }
+      return res.json({ ok: true, id: deal.id })
+    }
+    if (intent === 'update_deal') {
+      const id = String(p.id || '')
+      if (!id) return res.status(400).json({ error: 'invalid_params_id' })
+      const updates = { ...p }
+      delete updates.id
+      const { data, error } = await supabaseAdmin.from('deals').update(updates).eq('id', id).select('*').single()
+      if (error) return res.status(500).json({ error: error.message })
+      // regra: se aceitar/recusar, mover lead
+      try {
+        if ((updates.status === 'accepted' || updates.status === 'rejected') && data?.lead_id) {
+          const nextLeadStatus = updates.status === 'accepted' ? 'closed-won' : 'closed-lost'
+          await supabaseAdmin.from('leads').update({ status: nextLeadStatus }).eq('id', data.lead_id)
+        }
+      } catch {}
+      return res.json({ ok: true })
+    }
+    if (intent === 'delete_deal') {
+      const id = String(p.id || '')
+      if (!id) return res.status(400).json({ error: 'invalid_params_id' })
+      const { error } = await supabaseAdmin.from('deals').delete().eq('id', id)
+      if (error) return res.status(500).json({ error: error.message })
+      return res.json({ ok: true })
+    }
+
     return res.status(400).json({ error: 'unknown_intent' })
   } catch (e) {
     return res.status(500).json({ error: String(e?.message || e) })
   }
 })
 
+// === Proxies para CRM (para compat com UI quando VITE_API_BASE_URL não é aplicado) ===
+app.get('/api/analytics/followups', (req, res) => proxyToCRM(req, res, `/api/analytics/followups`))
+app.get('/api/followups/candidates', (req, res) => {
+  const qs = req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : ''
+  return proxyToCRM(req, res, `/api/followups/candidates${qs}`)
+})
+app.get('/api/followups/insights', (req, res) => {
+  const qs = req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : ''
+  return proxyToCRM(req, res, `/api/followups/insights${qs}`)
+})
+app.get('/api/goals', (req, res) => proxyToCRM(req, res, `/api/goals`))
+app.post('/api/dashboard/summary', (req, res) => proxyToCRM(req, res, `/api/dashboard/summary`))
+app.get('/api/analytics/reflections', (req, res) => proxyToCRM(req, res, `/api/analytics/reflections`))
+
+// Proxy WhatsApp Agent
+app.post('/api/wa/dispatch', (req, res) => proxyToWA(req, res, `/api/wa/dispatch`))
+
 // Provedor de WhatsApp: 'meta' (oficial), 'wapi', 'ultramsg', 'greenapi', 'zapi' ou 'wppconnect'
-const WHATSAPP_PROVIDER = (process.env.WHATSAPP_PROVIDER || 'wapi').toLowerCase()
+const WHATSAPP_PROVIDER = (process.env.WHATSAPP_PROVIDER || 'wppconnect').toLowerCase()
 
 // (IA removida)
 
@@ -425,6 +1121,115 @@ function normalizePhoneDigits(value) {
   return String(value || '').replace(/\D/g, '')
 }
 
+// ================================
+// Lead enrichment helpers
+// ================================
+function extractEmailsFromText(text) {
+  try {
+    const re = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g
+    const found = String(text || '').match(re) || []
+    // prefer the first unique
+    return Array.from(new Set(found)).slice(0, 3)
+  } catch { return [] }
+}
+
+function extractCompanyFromText(text) {
+  const t = String(text || '').trim()
+  if (!t) return null
+  // Heurísticas simples para PT-BR
+  const patterns = [
+    /(empresa|da empresa|do grupo|somos (?:a|da)|sou (?:da|de))\s+([A-Za-zÀ-ÿ0-9&.,\- ]{2,60})/i,
+    /(minha empresa|nossa empresa)\s*[:\-]?\s*([A-Za-zÀ-ÿ0-9&.,\- ]{2,60})/i,
+  ]
+  for (const re of patterns) {
+    const m = t.match(re)
+    if (m && m[2]) {
+      const raw = m[2].replace(/\s{2,}/g, ' ').trim()
+      // corta sufixos comuns após pontuação
+      const cleaned = raw.split(/[.,;\n]/)[0].trim()
+      if (cleaned && cleaned.length >= 2) return cleaned
+    }
+  }
+  return null
+}
+
+function normalizeLeadName(name) {
+  if (!name) return null
+  const s = String(name).replace(/[_]{2,}/g, ' ').replace(/[\t\n\r]/g, ' ').trim()
+  if (!s) return null
+  // Title Case simples
+  return s.toLowerCase().split(' ').filter(Boolean).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+}
+
+function normalizeTagsList(tags) {
+  const toSlug = (v) => String(v || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+  const arr = (Array.isArray(tags) ? tags : []).map(toSlug).filter(Boolean)
+  return Array.from(new Set(arr)).slice(0, 20)
+}
+
+async function upsertLeadIfMissing({ organization_id, phoneDigits, defaultName, source = 'whatsapp' }) {
+  if (!organization_id || !phoneDigits) return null
+  try {
+    const { data: existing } = await supabaseAdmin
+      .from('leads').select('*')
+      .ilike('phone', `%${phoneDigits.slice(-8)}%`).limit(1)
+    if (existing && existing[0]) return existing[0]
+    const ownerUserId = await pickOrgOwnerUserId(organization_id)
+    if (!ownerUserId) return null
+    const insertPayload = {
+      name: defaultName || `Contato ${phoneDigits.slice(-4)}`,
+      company: '—',
+      email: null,
+      phone: phoneDigits,
+      value: 0,
+      status: 'new',
+      responsible: 'Import',
+      source,
+      tags: ['auto-enriched', source],
+      notes: null,
+      user_id: ownerUserId,
+      organization_id,
+    }
+    const { data: ins, error } = await supabaseAdmin.from('leads').insert([insertPayload]).select('*').single()
+    if (error) return null
+    return ins
+  } catch { return null }
+}
+
+async function enrichLeadFromTextAndProfile(lead, { text, profileName }) {
+  try {
+    if (!lead) return
+    const updates = {}
+    // Email
+    if (!lead.email) {
+      const emails = extractEmailsFromText(text)
+      if (emails[0]) updates.email = emails[0]
+    }
+    // Company
+    if (!lead.company || lead.company === '—') {
+      const company = extractCompanyFromText(text)
+      if (company) updates.company = company
+    }
+    // Name
+    const normalizedProfile = normalizeLeadName(profileName)
+    const isGeneric = !lead.name || /^contato\s+\d{2,4}$/i.test(lead.name) || lead.name.length < 3
+    if (normalizedProfile && isGeneric) updates.name = normalizedProfile
+    // Tags
+    const extraTags = []
+    const low = String(text || '').toLowerCase()
+    if (/orçamento|orcamento|proposta/.test(low)) extraTags.push('orçamento')
+    if (/reclama|insatisfeito|ruim|p[ée]ssimo/.test(low)) extraTags.push('reclamacao')
+    if (/boleto|2ª\s*via|segunda\s*via/.test(low)) extraTags.push('boleto')
+    if (/agendar|reuni[aã]o|marcar/.test(low)) extraTags.push('agendamento')
+    const current = Array.isArray(lead.tags) ? lead.tags : []
+    const merged = normalizeTagsList([...current, ...extraTags])
+    if (merged.join('|') !== (current.map(String).join('|') || '')) updates.tags = merged
+    if (Object.keys(updates).length > 0) {
+      await supabaseAdmin.from('leads').update(updates).eq('id', lead.id)
+    }
+  } catch {}
+}
+
 // Validação opcional para webhooks W-API
 function verifyWapiSignature(req) {
   try {
@@ -689,7 +1494,7 @@ app.post('/webhooks/whatsapp', async (req, res) => {
         .ilike('phone', `%${normalized.slice(-8)}%`)
         .limit(1)
       if (leadErr) console.error('[whatsapp] erro buscando lead:', leadErr.message)
-      const lead = leads?.[0]
+      let lead = leads?.[0]
 
       const insertPayload = {
         lead_id: lead?.id || null,
@@ -722,6 +1527,16 @@ app.post('/webhooks/whatsapp', async (req, res) => {
           }
         } catch {}
       }
+      // Enriquecer lead: se não existir lead na org, criar com nome genérico
+      if (!lead && insertPayload.organization_id) {
+        lead = await upsertLeadIfMissing({ organization_id: insertPayload.organization_id, phoneDigits: normalized, defaultName: null, source: 'whatsapp' })
+        insertPayload.lead_id = lead?.id || null
+        insertPayload.user_id = lead?.user_id || null
+      }
+      // Tentar enriquecer com texto e (se disponível) profile name do remetente
+      const profileName = msg?.profile?.name || msg?.contacts?.[0]?.profile?.name || msg?.contacts?.[0]?.wa_name || null
+      if (lead) await enrichLeadFromTextAndProfile(lead, { text, profileName })
+
       const { error: commErr } = await supabaseAdmin
         .from('communications')
         .insert([insertPayload])
@@ -1380,62 +2195,10 @@ app.post('/api/messages/messenger', async (req, res) => {
 })
 
 // OAuth WhatsApp - gerar URL
-app.get('/auth/whatsapp/url', async (req, res) => {
-  try {
-    const user = await getUserFromAuthHeader(req)
-    if (!user) return res.status(401).json({ error: 'unauthorized' })
-    const state = signState(user.id)
-    const clientId = process.env.META_APP_ID
-    const redirectUri = process.env.META_REDIRECT_URI_WHATSAPP || process.env.META_REDIRECT_URI
-    const scope = encodeURIComponent('whatsapp_business_management,whatsapp_business_messaging')
-    if (!clientId || !redirectUri) return res.status(500).json({ error: 'META_APP_ID/META_REDIRECT_URI_WHATSAPP ausentes' })
-    const url = `https://www.facebook.com/v20.0/dialog/oauth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(state)}&scope=${scope}`
-    return res.json({ url })
-  } catch (e) {
-    console.error('[auth/whatsapp/url] error', e)
-    return res.sendStatus(500)
-  }
-})
+app.get('/auth/whatsapp/url', async (req, res) => res.status(404).json({ error: 'disabled' }))
 
 // OAuth WhatsApp - callback
-app.get('/auth/whatsapp/callback', async (req, res) => {
-  try {
-    const { code, state } = req.query
-    const userId = verifyState(state)
-    if (!userId) return res.status(400).send('invalid_state')
-    const clientId = process.env.META_APP_ID
-    const clientSecret = process.env.META_APP_SECRET
-    const redirectUri = process.env.META_REDIRECT_URI_WHATSAPP || process.env.META_REDIRECT_URI
-    if (!clientId || !clientSecret || !redirectUri) return res.status(500).send('meta_config_missing_whatsapp')
-
-    const tokenResp = await fetch(`https://graph.facebook.com/v20.0/oauth/access_token?client_id=${clientId}&client_secret=${clientSecret}&redirect_uri=${encodeURIComponent(redirectUri)}&code=${encodeURIComponent(code)}`)
-    const tokenJson = await tokenResp.json()
-    if (!tokenResp.ok) {
-      console.error('[auth/whatsapp/callback] token error', tokenJson)
-      return res.status(502).send('token_exchange_failed')
-    }
-    const access_token = tokenJson.access_token
-
-    // Salvar nas settings do usuário
-    const { error: setErr } = await supabaseAdmin
-      .from('settings')
-      .upsert({
-        user_id: userId,
-        key: 'whatsapp',
-        value: { access_token, connected_at: new Date().toISOString() },
-        updated_at: new Date().toISOString(),
-      }, { onConflict: 'user_id,key' })
-    if (setErr) {
-      console.error('[auth/whatsapp/callback] settings upsert error', setErr.message)
-      // Continua o fluxo, mas sinaliza
-    }
-
-    return res.send('<script>window.close && window.close(); window.opener && window.opener.postMessage({ type: "whatsapp_connected" }, "*");</script>Conexão concluída. Você pode fechar esta janela.')
-  } catch (e) {
-    console.error('[auth/whatsapp/callback] error', e)
-    return res.status(500).send('internal_error')
-  }
-})
+app.get('/auth/whatsapp/callback', async (req, res) => res.status(404).send('disabled'))
 
 // Listar números do WhatsApp do usuário autenticado (opcional para selecionar)
 app.get('/api/whatsapp/phones', async (req, res) => {
@@ -2388,7 +3151,7 @@ app.post('/webhooks/ultramsg', async (req, res) => {
       .ilike('phone', `%${from.slice(-8)}%`)
       .limit(1)
 
-    const lead = (leads || [])[0]
+    let lead = (leads || [])[0]
 
     // Tentar resolver organização via instanceId se não houver lead vinculado
     let orgId = lead?.organization_id || null
@@ -2429,6 +3192,14 @@ app.post('/webhooks/ultramsg', async (req, res) => {
         .limit(1)
       if (existing && existing.length > 0) return res.sendStatus(200)
     }
+    // Enriquecimento: criar lead se não houver (com base na org resolvida) e enriquecer dados
+    if (!lead && orgId) {
+      lead = await upsertLeadIfMissing({ organization_id: orgId, phoneDigits: from, defaultName: null, source: 'whatsapp' })
+      insertPayload.lead_id = lead?.id || null
+      insertPayload.user_id = lead?.user_id || ownerUserId
+    }
+    const profileName = data?.pushName || data?.senderName || null
+    if (lead) await enrichLeadFromTextAndProfile(lead, { text, profileName })
     await supabaseAdmin.from('communications').insert([insertPayload])
     return res.sendStatus(200)
   } catch (e) {
@@ -2454,7 +3225,7 @@ app.post('/webhooks/greenapi', async (req, res) => {
       .select('*')
       .ilike('phone', `%${from.slice(-8)}%`)
       .limit(1)
-    const lead = (leads || [])[0]
+    let lead = (leads || [])[0]
 
     // Resolver org por instanceId se necessário
     let orgId = lead?.organization_id || null
@@ -2494,6 +3265,14 @@ app.post('/webhooks/greenapi', async (req, res) => {
         .limit(1)
       if (existing && existing.length > 0) return res.sendStatus(200)
     }
+    // Enriquecimento
+    if (!lead && orgId) {
+      lead = await upsertLeadIfMissing({ organization_id: orgId, phoneDigits: from, defaultName: null, source: 'whatsapp' })
+      insertPayload.lead_id = lead?.id || null
+      insertPayload.user_id = lead?.user_id || ownerUserId
+    }
+    const profileName = msg?.senderData?.senderName || body?.senderData?.chatName || null
+    if (lead) await enrichLeadFromTextAndProfile(lead, { text, profileName })
     await supabaseAdmin.from('communications').insert([insertPayload])
     return res.sendStatus(200)
   } catch (e) {
@@ -2502,8 +3281,8 @@ app.post('/webhooks/greenapi', async (req, res) => {
   }
 })
 
-// Webhook W-API
-app.post('/webhooks/wapi', async (req, res) => {
+// Legacy W-API webhook (disabled)
+/* app.post('/webhooks/wapi', async (req, res) => {
   try {
     if (!verifyWapiSignature(req)) return res.sendStatus(403)
     const body = parseJsonBody(req)
@@ -2568,76 +3347,13 @@ app.post('/webhooks/wapi', async (req, res) => {
     console.error('[wapi] inbound error', e)
     return res.sendStatus(200)
   }
-})
+}) */
 
 // Webhook WPPConnect
-app.post('/webhooks/wppconnect', async (req, res) => {
-  try {
-    const body = parseJsonBody(req)
-    const data = body || {}
-    const msg = data.message || data.data || data
-    const text = msg?.body || msg?.text || data?.text || ''
-    const fromRaw = msg?.from || data?.from || msg?.chatId || msg?.chat?.id || ''
-    const externalId = msg?.id || data?.id || msg?.messageId || null
-    const session = data?.session || data?.Session || data?.sessionId || null
-    if (!fromRaw || !text) return res.status(200).json({ ok: true })
-    const from = String(fromRaw).replace(/\D/g, '')
+app.post('/webhooks/wppconnect', async (req, res) => res.status(404).json({ error: 'disabled' }))
 
-    const { data: leads } = await supabaseAdmin
-      .from('leads')
-      .select('*')
-      .ilike('phone', `%${from.slice(-8)}%`)
-      .limit(1)
-    const lead = (leads || [])[0]
-
-    // Resolver org pelo session se necessário
-    let orgId = lead?.organization_id || null
-    if (!orgId && session) {
-      try {
-        const { data: orgCfg } = await supabaseAdmin
-          .from('organization_settings')
-          .select('organization_id')
-          .eq('key', 'whatsapp_nonofficial')
-          .filter('value->>provider', 'eq', 'wppconnect')
-          .or(`value->>session.eq.${String(session)},value->>session_id.eq.${String(session)},value->>instance_id.eq.${String(session)}`)
-          .maybeSingle()
-        orgId = orgCfg?.organization_id || null
-      } catch {}
-    }
-
-    const ownerUserId = orgId ? await pickOrgOwnerUserId(orgId) : null
-    if (!orgId) return res.sendStatus(200)
-
-    const insertPayload = {
-      lead_id: lead?.id || null,
-      user_id: lead?.user_id || ownerUserId,
-      type: 'whatsapp',
-      direction: 'inbound',
-      subject: null,
-      content: text,
-      status: 'read',
-      external_id: externalId,
-      organization_id: orgId,
-    }
-    if (externalId) {
-      const { data: existing } = await supabaseAdmin
-        .from('communications')
-        .select('id')
-        .eq('external_id', externalId)
-        .eq('type', 'whatsapp')
-        .limit(1)
-      if (existing && existing.length > 0) return res.sendStatus(200)
-    }
-    await supabaseAdmin.from('communications').insert([insertPayload])
-    return res.sendStatus(200)
-  } catch (e) {
-    console.error('[wppconnect] inbound error', e)
-    return res.sendStatus(200)
-  }
-})
-
-// W-API: Received webhook (mensagens recebidas)
-app.post('/webhooks/wapi/received', async (req, res) => {
+// Legacy W-API received (disabled)
+/* app.post('/webhooks/wapi/received', async (req, res) => {
   try {
     if (!verifyWapiSignature(req)) return res.sendStatus(403)
     // Reutiliza lógica do handler unificado
@@ -2646,10 +3362,9 @@ app.post('/webhooks/wapi/received', async (req, res) => {
     console.error('[wapi/received] error', e)
     return res.sendStatus(200)
   }
-})
+}) */
 
-// W-API: Delivery webhook (entrega enviada)
-app.post('/webhooks/wapi/delivery', async (req, res) => {
+/* app.post('/webhooks/wapi/delivery', async (req, res) => {
   try {
     if (!verifyWapiSignature(req)) return res.sendStatus(403)
     const data = parseJsonBody(req) || {}
@@ -2665,10 +3380,9 @@ app.post('/webhooks/wapi/delivery', async (req, res) => {
     console.error('[wapi/delivery] error', e)
     return res.sendStatus(200)
   }
-})
+}) */
 
-// W-API: Message status webhook (sent/delivered/read/failed)
-app.post('/webhooks/wapi/message-status', async (req, res) => {
+/* app.post('/webhooks/wapi/message-status', async (req, res) => {
   try {
     if (!verifyWapiSignature(req)) return res.sendStatus(403)
     const data = parseJsonBody(req) || {}
@@ -2694,10 +3408,9 @@ app.post('/webhooks/wapi/message-status', async (req, res) => {
     console.error('[wapi/message-status] error', e)
     return res.sendStatus(200)
   }
-})
+}) */
 
-// W-API: Chat presence webhook (typing/online etc) — ignoramos por ora
-app.post('/webhooks/wapi/chat-presence', async (_req, res) => {
+/* app.post('/webhooks/wapi/chat-presence', async (_req, res) => {
   try {
     // opcional: validar assinatura/token
     if (!verifyWapiSignature(_req)) return res.sendStatus(403)
@@ -2705,18 +3418,17 @@ app.post('/webhooks/wapi/chat-presence', async (_req, res) => {
   } catch {
     return res.sendStatus(200)
   }
-})
+}) */
 
-// W-API: Connected/Disconnected webhooks — apenas logam/ack
-app.post('/webhooks/wapi/connected', async (_req, res) => {
+/* app.post('/webhooks/wapi/connected', async (_req, res) => {
   try { if (!verifyWapiSignature(_req)) return res.sendStatus(403); return res.sendStatus(200) } catch { return res.sendStatus(200) }
 })
 app.post('/webhooks/wapi/disconnected', async (_req, res) => {
   try { if (!verifyWapiSignature(_req)) return res.sendStatus(403); return res.sendStatus(200) } catch { return res.sendStatus(200) }
-})
+}) */
 
-// Webhook Z-API
-app.post('/webhooks/zapi', async (req, res) => {
+// Legacy Z-API webhook (disabled)
+/* app.post('/webhooks/zapi', async (req, res) => {
   try {
     const data = parseJsonBody(req) || {}
     const parsed = parseZapiInboundPayload(data)
@@ -2779,34 +3491,14 @@ app.post('/webhooks/zapi', async (req, res) => {
       return res.sendStatus(200)
     }
 
-    // Cria lead automaticamente quando não existir um lead correspondente
+    // Cria/enriquece lead automaticamente quando não existir
     let targetLead = lead || null
     if (!targetLead && ownerUserId) {
-      try {
-        const insertLead = {
-          name: `Contato ${from.slice(-4)}`,
-          company: '—',
-          email: null,
-          phone: from,
-          ig_username: null,
-          value: 0,
-          status: 'new',
-          responsible: 'Import',
-          source: 'whatsapp',
-          tags: ['zapi-inbound'],
-          notes: null,
-          user_id: ownerUserId,
-          organization_id: orgId,
-        }
-        const { data: created, error: createLeadErr } = await supabaseAdmin
-          .from('leads')
-          .insert([insertLead])
-          .select('*')
-          .single()
-        if (!createLeadErr && created) {
-          targetLead = created
-        }
-      } catch {}
+      targetLead = await upsertLeadIfMissing({ organization_id: orgId, phoneDigits: from, defaultName: null, source: 'whatsapp' })
+    }
+    if (targetLead) {
+      const profileName = parsed?.senderName || parsed?.pushName || null
+      await enrichLeadFromTextAndProfile(targetLead, { text, profileName })
     }
 
     const insertPayload = {
@@ -2835,10 +3527,9 @@ app.post('/webhooks/zapi', async (req, res) => {
     console.error('[zapi] inbound error', e)
     return res.sendStatus(200)
   }
-})
+}) */
 
-// Webhook Z-API: status da mensagem (delivered/read/failed)
-app.post('/webhooks/zapi/status', async (req, res) => {
+/* app.post('/webhooks/zapi/status', async (req, res) => {
   try {
     const data = parseJsonBody(req) || {}
     const msg = data.message || data.data || data
@@ -2873,6 +3564,208 @@ app.post('/webhooks/zapi/status', async (req, res) => {
   } catch (e) {
     console.error('[zapi] status error', e)
     return res.sendStatus(200)
+  }
+}) */
+
+// ================================
+// Planner plans.json management (admin)
+// ================================
+app.get('/api/planner/plans', async (req, res) => {
+  try {
+    // Require agent key or authenticated user admin/manager
+    const agentKey = req.headers['x-agent-key'] || req.headers['X-Agent-Key']
+    const isAgent = agentKey && String(agentKey) === String(process.env.AGENT_API_KEY || '')
+    let isAdmin = false
+    if (!isAgent) {
+      try {
+        const user = await getUserFromAuthHeader(req)
+        if (user?.id) {
+          // any authenticated user can read for now; could restrict by role
+          isAdmin = true
+        }
+      } catch {}
+    }
+    if (!isAgent && !isAdmin) return res.status(401).json({ error: 'unauthorized' })
+    const p = path.join(__dirname, 'Agente WhatsaApp', 'plans.json')
+    if (!fs.existsSync(p)) return res.json({})
+    const raw = fs.readFileSync(p, 'utf8')
+    try { return res.type('application/json').send(raw) } catch { return res.json(JSON.parse(raw)) }
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) })
+  }
+})
+
+// ================================
+// WPPConnect configuration and QR/status
+// ================================
+// Local WPPConnect SDK session manager (per organization)
+const wppLocal = {
+  sessions: new Map(), // organization_id -> { client, lastQrDataUrl, connected }
+}
+
+async function getWppSdk() {
+  try {
+    const mod = await import('@wppconnect-team/wppconnect')
+    return mod?.default || mod
+  } catch (e) {
+    throw new Error(`WPPConnect SDK não instalado. Adicione @wppconnect-team/wppconnect nas dependências. Detalhes: ${e?.message || e}`)
+  }
+}
+
+function isLocalWppConfig(v) {
+  if (!v) return false
+  const provider = String(v.provider || '').toLowerCase()
+  const base = String(v.base_url || '').toLowerCase()
+  return provider === 'wppconnect' && (base === 'local' || base === 'localhost' || base === 'embedded' || base === '')
+}
+
+function getLocalSession(orgId) {
+  return wppLocal.sessions.get(orgId) || null
+}
+
+async function stopLocalSession(orgId) {
+  const s = getLocalSession(orgId)
+  if (!s) return
+  try { if (s.client?.logout) await s.client.logout() } catch {}
+  try { if (s.client?.close) await s.client.close() } catch {}
+  wppLocal.sessions.delete(orgId)
+}
+
+async function ensureLocalClient(orgId, v) {
+  let existing = getLocalSession(orgId)
+  if (existing?.client) return existing
+  const wppconnect = await getWppSdk()
+  const sessionName = v?.session || v?.session_id || v?.instance_id || 'default'
+  let state = { client: null, lastQrDataUrl: null, connected: false }
+  const client = await wppconnect.create({
+    session: sessionName,
+    catchQR: (base64Qr /*, asciiQR */) => {
+      const dataUrl = String(base64Qr || '')
+      try { console.log(`[WPP] QR capturado para org=${orgId}, session=${sessionName}, tamanho=${dataUrl?.length||0}`) } catch {}
+      state.lastQrDataUrl = dataUrl.startsWith('data:') ? dataUrl : `data:image/png;base64,${dataUrl}`
+    },
+    statusFind: (statusSession /*, session */) => {
+      state.connected = String(statusSession || '').toLowerCase() === 'islogged'
+      try { console.log(`[WPP] status=${statusSession} org=${orgId} session=${sessionName}`) } catch {}
+    },
+    headless: 'new',
+    logQR: false,
+    autoClose: 0,
+    useChrome: String(process.env.WPPCONNECT_USE_CHROME || '').toLowerCase() === 'true',
+    browserPathExecutable: process.env.WPPCONNECT_CHROME_PATH || undefined,
+    puppeteerOptions: {
+      // Extra flags can help in some environments
+      args: [
+        '--disable-dev-shm-usage',
+        '--no-first-run',
+        '--no-default-browser-check',
+      ],
+    },
+  })
+  state.client = client
+  wppLocal.sessions.set(orgId, state)
+  return state
+}
+
+app.post('/api/org/whatsapp/wppconnect/config', async (req, res) => res.status(404).json({ error: 'disabled' }))
+
+app.get('/api/whatsapp/wppconnect/status', async (req, res) => res.status(404).json({ error: 'disabled' }))
+
+app.get('/api/whatsapp/wppconnect/qrcode', async (req, res) => res.status(404).json({ error: 'disabled' }))
+
+app.post('/api/whatsapp/wppconnect/start', async (req, res) => res.status(404).json({ error: 'disabled' }))
+
+// Extra controls for local mode
+app.post('/api/whatsapp/wppconnect/logout', async (req, res) => res.status(404).json({ error: 'disabled' }))
+
+app.post('/api/whatsapp/wppconnect/restart', async (req, res) => res.status(404).json({ error: 'disabled' }))
+app.put('/api/planner/plans', async (req, res) => {
+  try {
+    const agentKey = req.headers['x-agent-key'] || req.headers['X-Agent-Key']
+    const isAgent = agentKey && String(agentKey) === String(process.env.AGENT_API_KEY || '')
+    let isAdmin = false
+    if (!isAgent) {
+      try {
+        const user = await getUserFromAuthHeader(req)
+        if (user?.id) isAdmin = true
+      } catch {}
+    }
+    if (!isAgent && !isAdmin) return res.status(401).json({ error: 'unauthorized' })
+    // basic validation
+    const body = req.body
+    if (!body || typeof body !== 'object') return res.status(400).json({ error: 'invalid_json' })
+    // quick sanity check on structure
+    const plans = body
+    if (!plans || typeof plans !== 'object') return res.status(400).json({ error: 'invalid_plans' })
+    const keys = Object.keys(plans)
+    if (keys.length === 0) return res.status(400).json({ error: 'empty_plans' })
+    for (const k of keys) {
+      const v = plans[k]
+      if (!v || typeof v !== 'object') return res.status(400).json({ error: `invalid_plan_${k}` })
+      if (!Array.isArray(v.steps)) return res.status(400).json({ error: `invalid_plan_steps_${k}` })
+    }
+    const dir = path.join(__dirname, 'Agente WhatsaApp')
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+    const p = path.join(dir, 'plans.json')
+    // backup
+    if (fs.existsSync(p)) {
+      const backup = path.join(dir, `plans.backup.${new Date().toISOString().replace(/[:.]/g,'-')}.json`)
+      try { fs.copyFileSync(p, backup) } catch {}
+    }
+    fs.writeFileSync(p, JSON.stringify(plans, null, 2), 'utf8')
+    return res.json({ ok: true })
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) })
+  }
+})
+
+// Generate a plan with AI (Gemini)
+app.post('/api/planner/generate', async (req, res) => {
+  try {
+    // Auth: X-Agent-Key or authenticated user
+    const agentKey = req.headers['x-agent-key'] || req.headers['X-Agent-Key']
+    const isAgent = agentKey && String(agentKey) === String(process.env.AGENT_API_KEY || '')
+    let isAdmin = false
+    if (!isAgent) {
+      try { const user = await getUserFromAuthHeader(req); if (user?.id) isAdmin = true } catch {}
+    }
+    if (!isAgent && !isAdmin) return res.status(401).json({ error: 'unauthorized' })
+
+    const { name, goal, maxSteps = 6, domainHints = [], profileFields = [], tags = [] } = req.body || {}
+    if (!name || !goal) return res.status(400).json({ error: 'name_and_goal_required' })
+    const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY
+    if (!apiKey) return res.status(500).json({ error: 'gemini_api_key_missing' })
+    const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash'
+
+    const system = `Você é um gerador de planos de atendimento para um CRM. Responda APENAS JSON puro no formato: { "${name}": { "goal": string, "steps": [ { "name": string, "objective": string, "guidance_for_llm": string, "completion_rules": { "requires_profile_fields"?: string[], "any_of_profile_fields"?: string[], "profile_tags_contains"?: string[], "or_text_in_profile_summary"?: string[] } } ... ] } }.
+Regras:
+- Máximo de ${Math.max(1, Math.min(12, Number(maxSteps)))} etapas.
+- Textos curtos e diretos.
+- Use os seguintes campos de perfil quando fizer sentido: ${profileFields.join(', ') || 'veiculo.modelo, veiculo.ano, veiculo.cidade, veiculo.cep'}.
+- Se fizer sentido, sugira tags destas: ${tags.join(', ') || 'cotacao_calculada, proposta_gerada, vistoria_agendada, adesao_concluida'}.
+- NUNCA retorne nada além de JSON válido.`
+
+    const user = `Gere um plano chamado "${name}" com objetivo: ${goal}. Contexto: ${domainHints.join('; ') || 'geral CRM'}.`
+    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+        contents: [
+          { role: 'user', parts: [{ text: system }] },
+          { role: 'user', parts: [{ text: user }] }
+        ],
+        generationConfig: { temperature: 0.3, maxOutputTokens: 2048 }
+      })
+    })
+    const json = await resp.json()
+    const text = json?.candidates?.[0]?.content?.parts?.[0]?.text || ''
+    let plan = null
+    try { plan = JSON.parse(text) } catch {}
+    if (!plan || !plan[name]) return res.status(500).json({ error: 'invalid_ai_output', raw: text?.slice?.(0, 400) })
+
+    // quick validation
+    if (!Array.isArray(plan[name].steps)) return res.status(400).json({ error: 'invalid_steps' })
+    return res.json(plan)
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) })
   }
 })
 
@@ -3301,8 +4194,11 @@ app.post('/webhooks/autentique', async (req, res) => {
 // Gemini: parse intent a partir de linguagem natural
 app.post('/api/agent/parse-intent', async (req, res) => {
   try {
-    const apiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY
-    if (!apiKey) return res.status(500).json({ error: 'missing_gemini_key' })
+    const apiKey = process.env.GEMINI_API_KEY
+    if (!apiKey) {
+      console.error('[parse-intent] GEMINI_API_KEY ausente. Configure no .env e reinicie o servidor.')
+      return res.status(500).json({ error: 'missing_gemini_key' })
+    }
     const { prompt, context } = req.body || {}
     if (!prompt) return res.status(400).json({ error: 'prompt_required' })
 
@@ -3342,5 +4238,183 @@ app.post('/api/agent/parse-intent', async (req, res) => {
     return res.json(parsed)
   } catch (e) {
     return res.status(500).json({ error: String(e?.message || e) })
+  }
+})
+
+// Console chat com function-calling e opção de streaming SSE
+app.post('/api/console/chat', async (req, res) => {
+  try {
+    const { organization_id } = req.query
+    const { prompt, params } = req.body || {}
+    if (!prompt) return res.status(400).json({ error: 'prompt_required' })
+
+    const orgId = String(organization_id || params?.organization_id || '') || null
+    const baseUrl = (process.env.API_BASE_URL && String(process.env.API_BASE_URL).startsWith('http'))
+      ? String(process.env.API_BASE_URL)
+      : `http://localhost:${PORT}`
+
+    const isSSE = String(req.query.stream || '').toLowerCase() === '1' || String(req.headers.accept || '').includes('text/event-stream')
+
+    // Helper: SSE
+    const sse = {
+      init() {
+        if (!isSSE) return
+        res.setHeader('Content-Type', 'text/event-stream')
+        res.setHeader('Cache-Control', 'no-cache')
+        res.setHeader('Connection', 'keep-alive')
+        try { res.flushHeaders && res.flushHeaders() } catch {}
+      },
+      send(event, data) {
+        if (!isSSE) return
+        try { res.write(`event: ${event}\n`) } catch {}
+        try { res.write(`data: ${JSON.stringify(data)}\n\n`) } catch {}
+      },
+      done() { if (isSSE) { try { res.write('event: done\ndata: {}\n\n') } catch {}; try { res.end() } catch {} } }
+    }
+
+    // Tools (somente leitura executadas automaticamente). Ações mutáveis serão apenas sugeridas nas actions
+    const tools = {
+      async get_followup_queue({ limit = 5, timeframe = 'this_week', minProb = 0 } = {}) {
+        const qs = new URLSearchParams()
+        if (orgId) qs.set('organization_id', orgId)
+        const r = await fetch(`${baseUrl}/api/followup/queue?${qs.toString()}`)
+        const js = await r.json().catch(() => ({}))
+        let items = Array.isArray(js?.items) ? js.items : []
+        items = items.filter((i) => (i?.probability ?? 0) >= Number(minProb))
+        items.sort((a, b) => (Number(b?.probability || 0) - Number(a?.probability || 0)))
+        return items.slice(0, Number(limit))
+      },
+      async get_pipeline_stats() {
+        if (!orgId) return null
+        const r = await fetch(`${baseUrl}/api/pipeline/health?organization_id=${encodeURIComponent(orgId)}`)
+        return await r.json().catch(() => null)
+      },
+      async get_lead({ lead_id }) {
+        if (!lead_id) return null
+        const r = await fetch(`${baseUrl}/api/leads/${encodeURIComponent(lead_id)}`)
+        return await r.json().catch(() => null)
+      },
+      async search_leads({ query = '', limit = 10 } = {}) {
+        try {
+          if (!orgId) return []
+          const { data: leads } = await supabaseAdmin
+            .from('leads')
+            .select('*')
+            .ilike('name', `%${query}%`)
+            .eq('organization_id', orgId)
+            .limit(Number(limit || 10))
+          return leads || []
+        } catch { return [] }
+      }
+    }
+
+    const apiKey = process.env.GEMINI_API_KEY
+    if (!apiKey) {
+      console.error('[console/chat] GEMINI_API_KEY ausente. Configure no .env e reinicie o servidor.')
+      return res.status(500).json({ error: 'missing_gemini_key' })
+    }
+
+    // Prompt para loop de function-calling minimalista
+    const toolCatalog = [
+      {
+        name: 'get_followup_queue',
+        args: { limit: 'number?', timeframe: "'this_week'|'today'|'this_month'?", minProb: 'number?' },
+        description: 'Lista leads com maior probabilidade para follow-up'
+      },
+      { name: 'get_pipeline_stats', args: {}, description: 'Resumo de saúde do pipeline' },
+      { name: 'get_lead', args: { lead_id: 'string' }, description: 'Busca um lead por ID' },
+      { name: 'search_leads', args: { query: 'string', limit: 'number?' }, description: 'Pesquisa leads por nome' }
+    ]
+
+    function buildSystemPrompt() {
+      return `Você é um agente de CRM com acesso a ferramentas SOMENTE LEITURA. Objetivo: ajudar com insights e etapas recomendadas.\n\n` +
+      `Ferramentas disponíveis (somente leitura):\n` +
+      `${toolCatalog.map(t => `- ${t.name}(${JSON.stringify(t.args)}): ${t.description}`).join('\n')}\n\n` +
+      `Instruções de saída: sempre responda APENAS JSON. Em cada passo, responda um destes formatos:\n` +
+      `{"call": {"name": "tool_name", "args": {...}}, "commentary": "por que chamou"}\n` +
+      `OU {"final": {"text": "mensagem concisa", "items": [..opcional..], "actions": [{"type": "create_task|move_lead|open_lead|open_whatsapp_view", "params": {...}, "dangerous": boolean}]}}\n` +
+      `Nunca execute ações mutáveis. Em vez disso, inclua-as em actions com dangerous=true quando apropriado.`
+    }
+
+    async function llm(contents) {
+      const model = process.env.GEMINI_MODEL || 'gemini-1.5-flash'
+      const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contents, generationConfig: { temperature: 0.2, maxOutputTokens: 512 } })
+      })
+      const js = await resp.json().catch(() => ({}))
+      const text = js?.candidates?.[0]?.content?.parts?.[0]?.text || ''
+      return text
+    }
+
+    // Inicializa SSE
+    sse.init()
+    if (isSSE) sse.send('status', { state: 'starting' })
+
+    // Loop simples de function calling (guardrails: whitelist e limite de iterações)
+    const history = []
+    const maxIters = 3
+    let lastFinal = null
+    for (let iter = 1; iter <= maxIters; iter++) {
+      const contents = []
+      contents.push({ role: 'user', parts: [{ text: buildSystemPrompt() }] })
+      contents.push({ role: 'user', parts: [{ text: `Contexto: ${JSON.stringify({ orgId })}` }] })
+      contents.push({ role: 'user', parts: [{ text: `Prompt: ${String(prompt)}` }] })
+      if (history.length) contents.push({ role: 'user', parts: [{ text: `Histórico: ${JSON.stringify(history)}` }] })
+
+      const raw = await llm(contents)
+      let parsed = null
+      try { parsed = JSON.parse(raw) } catch { parsed = null }
+      if (!parsed) {
+        // Falhou parsing, encerra
+        lastFinal = { text: 'Não entendi. Pode reformular?', items: [], actions: [] }
+        break
+      }
+
+      if (parsed?.call?.name) {
+        const name = String(parsed.call.name)
+        const args = parsed.call.args || {}
+        // whitelist
+        if (!Object.prototype.hasOwnProperty.call(tools, name)) {
+          lastFinal = { text: 'Pedido de ferramenta desconhecida.', items: [], actions: [] }
+          break
+        }
+        if (isSSE) sse.send('tool_call', { name, args, iter })
+        let result = null
+        try { result = await tools[name](args) } catch (e) { result = { error: String(e?.message || e) } }
+        history.push({ call: { name, args }, result })
+        if (isSSE) sse.send('tool_result', { name, result, iter })
+        continue
+      }
+
+      if (parsed?.final) {
+        lastFinal = {
+          text: String(parsed.final.text || '').trim() || '—',
+          items: Array.isArray(parsed.final.items) ? parsed.final.items : [],
+          actions: Array.isArray(parsed.final.actions) ? parsed.final.actions.map((a) => ({
+            type: String(a?.type || ''),
+            params: a?.params || a?.defaults || {},
+            dangerous: Boolean(a?.dangerous || (a?.type && /create|update|delete|move|send/i.test(String(a.type))))
+          })) : []
+        }
+        if (isSSE) sse.send('final', lastFinal)
+        break
+      }
+    }
+
+    if (!lastFinal) lastFinal = { text: 'Sem resultados por enquanto.', items: [], actions: [] }
+
+    if (isSSE) {
+      sse.done()
+      return
+    }
+    return res.json(lastFinal)
+  } catch (e) {
+    console.error('[console/chat] error:', e)
+    if (String(req.headers.accept || '').includes('text/event-stream') || String(req.query.stream || '').toLowerCase() === '1') {
+      try { res.write(`event: error\ndata: ${JSON.stringify({ error: 'internal_error' })}\n\n`) } catch {}
+      try { res.end() } catch {}
+      return
+    }
+    res.status(500).json({ error: 'internal_error' })
   }
 })

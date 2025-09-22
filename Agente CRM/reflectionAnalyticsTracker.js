@@ -91,6 +91,89 @@ class ReflectionAnalyticsTracker {
         console.log("[ReflectionAnalyticsTracker] Todos os dados de reflexão foram limpos.");
     }
 
+    /**
+     * Infere a micropersona do lead com base no histórico de reflexões.
+     * @param {string} leadId
+     * @returns {{ persona: string, tags: string[], padrao: object } | null}
+     */
+    getInferredPersonaForLead(leadId) {
+        const leadReflections = this.reflectionLog.filter(r => r.leadId === leadId);
+        if (!leadReflections.length) return null;
+        // Contadores
+        const sentimentos = {};
+        const acoes = {};
+        const hipoteses = {};
+        for (const r of leadReflections) {
+            if (r.inferredLeadSentiment) sentimentos[r.inferredLeadSentiment] = (sentimentos[r.inferredLeadSentiment] || 0) + 1;
+            if (r.agentAction) acoes[r.agentAction] = (acoes[r.agentAction] || 0) + 1;
+            if (r.hypothesisStatus) hipoteses[r.hypothesisStatus] = (hipoteses[r.hypothesisStatus] || 0) + 1;
+        }
+        // Dominantes
+        const sentimento = this._getDominant(sentimentos);
+        const acao = this._getDominant(acoes);
+        const hipotese = this._getDominant(hipoteses);
+        // Heurística de persona
+        let persona = 'indefinido';
+        let tags = [];
+        if (sentimento === 'cético' && acao === 'prova social') {
+            persona = 'Cético racional'; tags = ['detalhista', 'questionador'];
+        } else if (sentimento === 'entusiasmado' && acao === 'avançar etapa') {
+            persona = 'Entusiasta apressado'; tags = ['impulsivo', 'pragmático'];
+        } else if (sentimento === 'analítico' && acao === 'análise técnica') {
+            persona = 'Analítico técnico'; tags = ['lógico', 'detalhista'];
+        } else if (sentimento === 'em dúvida' && acao === 'pergunta aberta') {
+            persona = 'Em dúvida passiva'; tags = ['indeciso', 'precisa de validação'];
+        } else if (sentimento && acao) {
+            persona = `${sentimento} ${acao}`;
+            tags = [sentimento, acao];
+        }
+        return {
+            persona,
+            tags,
+            padrao: {
+                sentimentos: Object.keys(sentimentos),
+                acoes: Object.keys(acoes),
+                hipoteses: Object.keys(hipoteses)
+            }
+        };
+    }
+
+    /**
+     * Agrupa leads por sentimentos dominantes e sucesso de estratégia, retornando padrões para micropersonas.
+     * @returns {Array<{ sentimento: string, acao: string, total: number, sucesso: number, taxaSucesso: number, leadIds: string[] }>} 
+     */
+    getPatternsForMicropersonas() {
+        const clusters = {};
+        for (const r of this.reflectionLog) {
+            const sentimento = r.inferredLeadSentiment || 'desconhecido';
+            const acao = r.agentAction || 'desconhecida';
+            const key = `${sentimento}__${acao}`;
+            if (!clusters[key]) {
+                clusters[key] = { sentimento, acao, total: 0, sucesso: 0, leadIds: new Set() };
+            }
+            clusters[key].total++;
+            if (r.stepGoalAchieved) clusters[key].sucesso++;
+            clusters[key].leadIds.add(r.leadId);
+        }
+        // Formatar resultado
+        return Object.values(clusters).map(c => ({
+            sentimento: c.sentimento,
+            acao: c.acao,
+            total: c.total,
+            sucesso: c.sucesso,
+            taxaSucesso: c.total ? c.sucesso / c.total : 0,
+            leadIds: Array.from(c.leadIds)
+        })).sort((a, b) => b.total - a.total);
+    }
+
+    _getDominant(obj) {
+        let max = 0, key = null;
+        for (const k in obj) {
+            if (obj[k] > max) { max = obj[k]; key = k; }
+        }
+        return key;
+    }
+
     // Futuramente:
     // - getInsightsFromAggregatedReflections(): Para a Ideia 7, poderia usar uma LLM para analisar this.reflectionLog.
     // - getPatternsForMicropersonas(): Para a Ideia 2, analisaria sentimento vs. ação.

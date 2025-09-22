@@ -154,7 +154,7 @@ export function ActivitiesView({ onViewLead, title = "Atividades", lockedType }:
         </Dialog>
       </div>
 
-      <Card className="bg-gradient-card border-border shadow-card mb-4">
+      <Card className="border-border/50 shadow-none mb-4">
         <CardContent className="p-4 grid grid-cols-1 md:grid-cols-4 gap-3">
           <div>
             <Label>Lead</Label>
@@ -218,7 +218,7 @@ export function ActivitiesView({ onViewLead, title = "Atividades", lockedType }:
             const lead = leads.find((l) => l.id === a.lead_id)
             const overdue = a.due_date && !a.completed && new Date(a.due_date) < new Date()
             return (
-              <Card key={a.id} className="bg-gradient-card border-border shadow-card">
+              <Card key={a.id} className="border-border/50 shadow-none">
                 <CardContent className="p-4 flex items-center gap-4">
                   <Checkbox checked={a.completed} onCheckedChange={(v) => handleInlineToggle(a.id, Boolean(v))} />
                   <div className="flex-1 min-w-0">

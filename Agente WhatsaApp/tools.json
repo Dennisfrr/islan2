@@ -1,0 +1,24 @@
+{
+  "tools": [
+    {
+      "id": "crm-update",
+      "type": "webhook",
+      "method": "POST",
+      "url": "http://localhost:3005/api/hooks/crm-update",
+      "headers": {
+        "Content-Type": "application/json"
+      }
+    },
+    {
+      "id": "calendar-booking",
+      "type": "webhook",
+      "method": "POST",
+      "url": "http://localhost:3005/api/hooks/calendar",
+      "headers": {
+        "Content-Type": "application/json"
+      }
+    }
+  ]
+}
+
+

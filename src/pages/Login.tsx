@@ -74,14 +74,14 @@ export default function Login() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
-      <Card className="w-full max-w-md bg-white/80 backdrop-blur-sm border-0 shadow-2xl">
+    <div className="min-h-screen bg-gradient-dark flex items-center justify-center p-4">
+      <Card className="w-full max-w-md backdrop-blur-sm border border-border shadow-card">
         <CardHeader className="text-center space-y-2">
-          <div className="w-16 h-16 bg-gradient-to-r from-blue-600 to-indigo-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
+          <div className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4 bg-primary text-primary-foreground shadow-glow">
             <img src="/logo.jpg" alt="Rmidia CRM" className="w-12 h-12 object-contain" />
           </div>
-          <CardTitle className="text-2xl font-bold text-gray-900">Rmidia CRM</CardTitle>
-          <CardDescription className="text-gray-600">
+          <CardTitle className="text-2xl font-bold text-foreground">Rmidia CRM</CardTitle>
+          <CardDescription className="text-muted-foreground">
             Gerencie seus leads e vendas de forma eficiente
           </CardDescription>
         </CardHeader>
@@ -208,11 +208,11 @@ export default function Login() {
 
           <div className="mt-6 text-center">
             <div className="flex flex-col gap-1 items-center">
-              <p className="text-sm text-gray-600">
+              <p className="text-sm text-muted-foreground">
                 {isLogin ? 'Não tem uma conta?' : 'Já tem uma conta?'}{' '}
                 <button
                   type="button"
-                  className="text-blue-600 hover:text-blue-700 font-medium"
+                  className="text-primary hover:text-primary/80 font-medium"
                   onClick={() => setIsLogin(!isLogin)}
                 >
                   {isLogin ? 'Criar conta' : 'Fazer login'}
@@ -221,7 +221,7 @@ export default function Login() {
               {isLogin && (
                 <button
                   type="button"
-                  className="text-xs text-blue-600 hover:text-blue-700"
+                  className="text-xs text-primary hover:text-primary/80"
                   onClick={handleForgotPassword}
                 >
                   Esqueci minha senha

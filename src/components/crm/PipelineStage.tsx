@@ -43,33 +43,33 @@ export function PipelineStage({
   const totalValue = leads.reduce((sum, l) => sum + (Number(l.value) || 0), 0)
 
   return (
-    <div ref={setNodeRef} className="bg-card rounded-lg p-3 border border-border flex flex-col">
+    <div ref={setNodeRef} className="rounded-lg p-3 border border-border/50 flex flex-col">
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
-          <div className={`w-2.5 h-2.5 ${stage.color} rounded-full`} />
-          <div className="flex items-center gap-1">
-            <h3 className="font-medium text-foreground text-sm">{stage.name}</h3>
+          <div className={`w-2 h-2 bg-foreground/40 rounded-full`} />
+          <div className="flex items-center gap-2">
+            <h3 className="text-[11px] tracking-wide uppercase text-foreground/80">{stage.name}</h3>
             {onEditStages && (
               <Button
                 title="Editar estágios"
                 variant="ghost"
                 size="icon"
-                className="h-6 w-6 p-0"
+                className="h-6 w-6 p-0 text-foreground/60 hover:text-foreground"
                 onClick={() => onEditStages?.(stage.id)}
               >
                 <Pencil className="h-3.5 w-3.5" />
               </Button>
             )}
+            <Badge variant="outline" className="rounded-full px-2 py-0.5 text-[11px] border-border/60 text-foreground/80">{leads.length}</Badge>
           </div>
-          <Badge variant="secondary">{leads.length}</Badge>
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-xs text-muted-foreground font-medium">R$ {totalValue.toLocaleString('pt-BR')}</span>
-          <Button variant="ghost" size="sm" onClick={() => onCreateLeadInStage?.(stage.id as Lead['status'])}>
+          <span className="text-xs text-foreground/60 font-medium">R$ {totalValue.toLocaleString('pt-BR')}</span>
+          <Button variant="ghost" size="sm" className="text-foreground/70 hover:bg-sidebar-accent" onClick={() => onCreateLeadInStage?.(stage.id as Lead['status'])}>
             <Plus className="h-4 w-4" />
           </Button>
           {onBulkCreateInStage && (
-            <Button title="Criar vários" variant="ghost" size="sm" onClick={() => onBulkCreateInStage?.(stage.id as Lead['status'])}>
+            <Button title="Criar vários" variant="ghost" size="sm" className="text-foreground/70 hover:bg-sidebar-accent" onClick={() => onBulkCreateInStage?.(stage.id as Lead['status'])}>
               <ListPlus className="h-4 w-4" />
             </Button>
           )}
@@ -77,7 +77,7 @@ export function PipelineStage({
       </div>
 
       {leads.length === 0 ? (
-        <div className="flex-1 flex flex-col items-center justify-center text-center border border-dashed border-border rounded-md p-6">
+        <div className="flex-1 flex flex-col items-center justify-center text-center border border-dashed border-border/60 rounded-md p-6">
           <p className="text-xs text-muted-foreground mb-2">Nenhum lead neste estágio</p>
           <Button size="sm" onClick={() => onCreateLeadInStage?.(stage.id as Lead['status'])}>Novo lead</Button>
         </div>

@@ -8,12 +8,12 @@ const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold, SchemaType } = gen
 const { getSession, closeDriver, getDriver } = require('./db_neo4j'); // Supondo que este arquivo exista e funcione
 const { handleDebouncedMessage } = require('./debounceHandler');
 const { Planner } = require('./planner');
+const neo4j = require('neo4j-driver');
+const { dispatchToCRM, CRM_ORGANIZATION_ID } = require('./crmBridge');
 const { ReflectiveAgent, ReflectionFocus } = require('./reflectiveAgent');
 const { ReflectionAnalyticsTracker } = require('./reflectionAnalyticsTracker'); // Importa o Tracker
-const { recommendTacticsForStep, updateAfterReflection } = require('./graphBandit');
-const { evaluateAndRunTools } = require('./toolsEngine');
-const { evaluateAndRunWorkflows } = require('./workflowsEngine');
-const { sendEvent: sendN8nEvent } = require('./n8nClient');
+const { MetaReflexor } = require('./metaReflexor'); // Importa o MetaReflexor
+const fetch = require('node-fetch');
 
 // --- Configurações Globais ---
 const SESSION_NAME = process.env.SESSION_NAME || 'wpp-consultor-neo4j';
@@ -31,6 +31,129 @@ const MAX_TOOL_ITERATIONS = 5;
 const debounceActiveForUser = new Map();
 let globalReflectiveAgent;
 let globalAnalyticsTracker; // Instância global do Tracker
+let globalMetaReflexor; // Instância global do MetaReflexor
+
+// Pequeno cache/debounce para reflexões por lead
+const reflectionCache = new Map(); // leadId -> { signature: string, at: number }
+function buildReflectionSignature(agentMsg, userMsg, plannerState, leadProfile) {
+    const step = plannerState?.currentStep?.name || '';
+    const plan = plannerState?.selectedPlanName || '';
+    const lpv = [
+        leadProfile?.nivelDeInteresseReuniao || '',
+        (leadProfile?.principaisDores || []).slice(0,3).join('|'),
+        (leadProfile?.tags || []).slice(0,3).join('|'),
+    ].join('~');
+    const text = [String(agentMsg||'').slice(0,200), String(userMsg||'').slice(0,200), step, plan, lpv].join('||');
+    let h = 2166136261;
+    for (let i=0; i<text.length; i++) { h ^= text.charCodeAt(i); h += (h<<1)+(h<<4)+(h<<7)+(h<<8)+(h<<24); }
+    return String(h >>> 0);
+}
+function shouldSkipReflection(leadId, signature, windowMs = 90 * 1000) {
+    const prev = reflectionCache.get(leadId);
+    if (!prev) return false;
+    const recent = Date.now() - prev.at < windowMs;
+    return recent && prev.signature === signature;
+}
+function markReflection(leadId, signature) {
+    reflectionCache.set(leadId, { signature, at: Date.now() });
+}
+
+// =======================================================================================
+//  EXTRACTION PROFILE (Config -> Agente) INTEGRAÇÃO LEVE
+// =======================================================================================
+const extractionProfileCache = { data: null, at: 0 };
+async function getExtractionProfileCached() {
+  const ttlMs = 5 * 60 * 1000;
+  if (extractionProfileCache.data && (Date.now() - extractionProfileCache.at) < ttlMs) return extractionProfileCache.data;
+  try {
+    const baseDash = `http://localhost:${process.env.DASHBOARD_PORT || 3005}`;
+    const url = `${String(baseDash).replace(/\/$/,'')}/api/agent/extraction-profile${CRM_ORGANIZATION_ID ? `?organization_id=${encodeURIComponent(CRM_ORGANIZATION_ID)}` : ''}`;
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`status ${r.status}`);
+    const js = await r.json().catch(() => ({}));
+    extractionProfileCache.data = js || null;
+    extractionProfileCache.at = Date.now();
+    return extractionProfileCache.data;
+  } catch (e) {
+    console.warn('[ExtractionProfile] load failed:', e?.message || e);
+    extractionProfileCache.data = null;
+    extractionProfileCache.at = Date.now();
+    return null;
+  }
+}
+
+function lightExtractByType(field, text) {
+  const t = String(text || '');
+  const key = String(field.key || '').toLowerCase();
+  const type = String(field.type || 'string').toLowerCase();
+  // Email
+  if (key.includes('email') || type === 'email') {
+    const m = t.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
+    if (m) return m[0];
+    return null;
+  }
+  // Número (orçamento, valor etc)
+  if (type === 'number' || /orcamento|orçamento|budget|valor/.test(key)) {
+    const m = t.match(/(\d+[\.,]?\d*)\s*(k|mil)?/i);
+    if (m) {
+      let n = parseFloat(m[1].replace(',', '.'));
+      if (m[2]) n = n * 1000;
+      return n;
+    }
+    return null;
+  }
+  // Telefone
+  if (key.includes('phone') || key.includes('telefone')) {
+    const m = t.replace(/\D/g, '').match(/\d{10,14}/);
+    if (m) return m[0];
+    return null;
+  }
+  // Dor / string livre: captura frase curta
+  const sentence = t.split(/[\.!?\n]/).map(s => s.trim()).find(s => s.length > 0) || '';
+  return sentence.slice(0, 180);
+}
+
+function runLightExtraction(profileDef, text) {
+  const out = {};
+  if (!profileDef || !Array.isArray(profileDef.fields)) return out;
+  for (const f of profileDef.fields) {
+    if (String(f.source||'pattern') === 'llm') {
+      // placeholder: aqui poderia chamar um extrator semântico (LLM) futuro.
+      // por ora, usa fallback leve
+    }
+    const v = lightExtractByType(f, text);
+    if (v != null && v !== '') out[f.key] = v;
+  }
+  return out;
+}
+
+async function runSmartExtractionLLM(fields, text, instructions) {
+  try {
+    if (!Array.isArray(fields) || fields.length === 0) return {};
+    const { GoogleGenerativeAI } = generativeAI_module;
+    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+    const model = genAI.getGenerativeModel({ model: GEMINI_MODEL_NAME, generationConfig: { temperature: 0.2, maxOutputTokens: 512 } });
+    const keys = fields.map(f => f.key).join(", ");
+    const sys = `Você é um extrator de informações. Extraia os seguintes campos do texto (se existir): ${keys}. Responda somente em JSON. Campos ausentes devem ser null. Instruções: ${String(instructions||'')}`;
+    const prompt = `${sys}\n\nTEXTO:\n${text}\n\nJSON:`;
+    const res = await model.generateContent([{ text: prompt }]);
+    const outText = res?.response?.text?.() || res?.response?.candidates?.[0]?.content?.parts?.map(p=>p.text).join('') || '';
+    try {
+      const parsed = JSON.parse(outText.trim());
+      const out = {};
+      for (const f of fields) {
+        if (parsed && Object.prototype.hasOwnProperty.call(parsed, f.key)) out[f.key] = parsed[f.key];
+      }
+      return out;
+    } catch {
+      // fallback: retorna objeto vazio se não parsear
+      return {};
+    }
+  } catch (e) {
+    console.warn('[LLM Extraction] error:', e?.message || e);
+    return {};
+  }
+}
 
 // =======================================================================================
 //  INICIALIZAÇÃO DE MÓDULOS GLOBAIS
@@ -47,6 +170,8 @@ if (!SchemaType || typeof SchemaType.OBJECT === 'undefined') {
 try {
     globalReflectiveAgent = new ReflectiveAgent(GEMINI_API_KEY);
     globalAnalyticsTracker = new ReflectionAnalyticsTracker();
+    globalMetaReflexor = new MetaReflexor(globalAnalyticsTracker); // Instancia o MetaReflexor
+    globalMetaReflexor.start(); // Inicia análise periódica
 } catch (e) {
     console.error("!!! CRÍTICO: Falha ao instanciar ReflectiveAgent ou AnalyticsTracker. !!!", e);
     globalReflectiveAgent = null;
@@ -79,133 +204,6 @@ const tools = [
             } catch (error) {
                 console.error(`[Tool Error] get_lead_profile:`, error);
                 return JSON.stringify({ error: `Erro ao buscar perfil: ${error.message}` });
-            }
-        }
-    },
-    // === PROTEÇÃO VEICULAR: Ferramentas Stub ===
-    {
-        name: "calculate_vehicle_protection_quote",
-        description: "Calcula uma cotação estimada de proteção veicular com base em dados do veículo (modelo, ano), cidade/CEP, uso e perfil do condutor. Retorna valores estimados e opções de cobertura/assistências.",
-        parameters: {
-            type: SchemaType.OBJECT,
-            properties: {
-                vehicle: {
-                    type: SchemaType.OBJECT,
-                    properties: {
-                        modelo: { type: SchemaType.STRING },
-                        ano: { type: SchemaType.STRING },
-                        cidade: { type: SchemaType.STRING },
-                        cep: { type: SchemaType.STRING },
-                        uso: { type: SchemaType.STRING }
-                    }
-                },
-                driverProfile: {
-                    type: SchemaType.OBJECT,
-                    properties: {
-                        idade: { type: SchemaType.STRING },
-                        bonusClasse: { type: SchemaType.STRING }
-                    }
-                }
-            },
-            required: ["vehicle"]
-        },
-        execute: async ({ vehicle, driverProfile }) => {
-            try {
-                const base = 89; // stub base
-                const fatorAno = vehicle.ano && Number(vehicle.ano) < 2015 ? 1.15 : 1.0;
-                const fatorUso = vehicle.uso && vehicle.uso.toLowerCase().includes('app') ? 1.25 : 1.0;
-                const valor = Math.round(base * fatorAno * fatorUso);
-                const quote = {
-                    valorMensalEstimado: valor,
-                    coberturas: ["Roubo/Furto", "Colisão parcial", "Perda total"],
-                    assistencias: ["Guincho 200km", "Chaveiro", "Troca de pneu"],
-                    observacoes: "Valores estimados. Confirmar após vistoria/política da associação.",
-                };
-                // Marca perfil na sessão
-                return JSON.stringify({ success: true, quote });
-            } catch (e) {
-                return JSON.stringify({ success: false, error: e.message });
-            }
-        }
-    },
-    {
-        name: "generate_membership_proposal",
-        description: "Gera proposta/adesão para a proteção veicular e retorna instruções de envio de documentos e pagamento.",
-        parameters: {
-            type: SchemaType.OBJECT,
-            properties: {
-                leadId: { type: SchemaType.STRING },
-                vehicle: { type: SchemaType.OBJECT },
-                quoteAccepted: { type: SchemaType.BOOLEAN }
-            },
-            required: ["leadId", "quoteAccepted"]
-        },
-        execute: async ({ leadId, vehicle, quoteAccepted }) => {
-            try {
-                if (!quoteAccepted) return JSON.stringify({ success: false, message: "Cliente não confirmou a cotação." });
-                // Atualiza tags do perfil na sessão se disponível
-                if (chatSessions[leadId] && chatSessions[leadId].perfil) {
-                    const perfil = chatSessions[leadId].perfil;
-                    perfil.tags = Array.from(new Set([...(perfil.tags || []), "proposta_gerada"]));
-                    perfil.ultimoResumoDaSituacao = "Proposta gerada e enviada para conferência.";
-                    await salvarPerfilLead(leadId, perfil);
-                }
-                return JSON.stringify({ success: true, proposalId: `PROP-${Date.now()}` });
-            } catch (e) {
-                return JSON.stringify({ success: false, error: e.message });
-            }
-        }
-    },
-    {
-        name: "schedule_vehicle_inspection",
-        description: "Agenda vistoria do veículo, retornando janela de atendimento/protocolo.",
-        parameters: {
-            type: SchemaType.OBJECT,
-            properties: {
-                leadId: { type: SchemaType.STRING },
-                preferredDates: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING } },
-                cityOrCEP: { type: SchemaType.STRING }
-            },
-            required: ["leadId", "preferredDates"]
-        },
-        execute: async ({ leadId, preferredDates, cityOrCEP }) => {
-            try {
-                const protocolo = `VIST-${Math.floor(Math.random()*100000)}`;
-                if (chatSessions[leadId] && chatSessions[leadId].perfil) {
-                    const perfil = chatSessions[leadId].perfil;
-                    perfil.tags = Array.from(new Set([...(perfil.tags || []), "vistoria_agendada"]));
-                    perfil.ultimoResumoDaSituacao = `Vistoria agendada. Protocolo ${protocolo}.`;
-                    await salvarPerfilLead(leadId, perfil);
-                }
-                return JSON.stringify({ success: true, protocolo, janela: preferredDates[0] || null, local: cityOrCEP || null });
-            } catch (e) {
-                return JSON.stringify({ success: false, error: e.message });
-            }
-        }
-    },
-    {
-        name: "open_claim_and_get_protocol",
-        description: "Abre um sinistro e retorna protocolo e próximas orientações.",
-        parameters: {
-            type: SchemaType.OBJECT,
-            properties: {
-                leadId: { type: SchemaType.STRING },
-                occurrence: { type: SchemaType.OBJECT }
-            },
-            required: ["leadId", "occurrence"]
-        },
-        execute: async ({ leadId, occurrence }) => {
-            try {
-                const protocolo = `SINS-${Math.floor(Math.random()*100000)}`;
-                if (chatSessions[leadId] && chatSessions[leadId].perfil) {
-                    const perfil = chatSessions[leadId].perfil;
-                    perfil.tags = Array.from(new Set([...(perfil.tags || []), "sinistro_aberto"]));
-                    perfil.ultimoResumoDaSituacao = `Sinistro aberto. Protocolo ${protocolo}.`;
-                    await salvarPerfilLead(leadId, perfil);
-                }
-                return JSON.stringify({ success: true, protocolo });
-            } catch (e) {
-                return JSON.stringify({ success: false, error: e.message });
             }
         }
     },
@@ -288,6 +286,128 @@ const tools = [
                             console.log(`[Tool Execute - analyze_and_update_lead_profile] Verificando progresso do planner para ${leadId}.`);
                             chatSessions[leadId].planner.checkAndUpdateProgress(perfilTotalmenteAtualizado);
                         }
+                    }
+                    // Best-effort notify CRM intents with updated profile fields
+                    try {
+                        const phone = String(leadId || '').replace(/\D/g, '');
+                        const p = perfilTotalmenteAtualizado || {};
+                        try {
+                            await dispatchToCRM('update_lead', {
+                                phone,
+                                organization_id: CRM_ORGANIZATION_ID || undefined,
+                                name: p.nomeDoLead || p.name || undefined,
+                                company: p.nomeDoNegocio || p.businessName || undefined,
+                                status: undefined,
+                                notes: p.ultimoResumoDaSituacao || undefined,
+                                tags: Array.isArray(p.tags) ? p.tags : undefined,
+                                value: undefined,
+                            });
+                            // Golden Note: resumo da situação
+                            try {
+                                const title = 'Dado de Ouro — Resumo atualizado';
+                                const description = (p.ultimoResumoDaSituacao || p.lastSummary || '').toString().slice(0, 1200) || '—';
+                                await dispatchToCRM('create_note', {
+                                    phone,
+                                    title,
+                                    description,
+                                    organization_id: CRM_ORGANIZATION_ID || undefined,
+                                }, { idempotencyKey: `gold-note-profile-${phone}-${Buffer.from(description).toString('base64').slice(0,32)}` });
+                                // Follow-up Task: próximo passo da reflexão/perfil, se houver
+                                const nextStep = (typeof p.proximoPassoLogicoSugerido === 'string' && p.proximoPassoLogicoSugerido)
+                                  || (typeof p.nextStep === 'string' && p.nextStep)
+                                  || null;
+                                if (nextStep) {
+                                  const due = new Date(Date.now() + 24*60*60*1000).toISOString();
+                                  await dispatchToCRM('create_task', {
+                                    phone,
+                                    title: nextStep,
+                                    description: 'Gerado automaticamente após atualização de perfil.',
+                                    due_date: due,
+                                    organization_id: CRM_ORGANIZATION_ID || undefined,
+                                  }, { idempotencyKey: `auto-task-profile-${phone}-${Buffer.from(nextStep).toString('base64').slice(0,24)}` });
+                                }
+                                // Oportunidade: menção a orçamento/prazo no resumo → alerta quente
+                                const lower = description.toLowerCase()
+                                if (/orcamento|orçamento|budget|prazo|deadline|cotação|cotacao/i.test(lower)) {
+                                  try {
+                                    await dispatchToCRM('create_note', {
+                                      phone,
+                                      title: 'Alerta de Oportunidade — Janela Quente',
+                                      description: 'Resumo menciona orçamento/prazo. Priorize este lead.',
+                                      organization_id: CRM_ORGANIZATION_ID || undefined,
+                                    }, { idempotencyKey: `hot-window-${phone}` })
+                                    const due = new Date(Date.now() + 12*60*60*1000).toISOString()
+                                    await dispatchToCRM('create_task', {
+                                      phone,
+                                      title: 'Priorizar contato — janela quente',
+                                      description: 'Responder em até 12h com proposta/ajuste.',
+                                      due_date: due,
+                                      organization_id: CRM_ORGANIZATION_ID || undefined,
+                                    }, { idempotencyKey: `hot-window-task-${phone}` })
+                                  } catch {}
+                                }
+                                // Decisor identificado (cargo/poder de decisão)
+                                if (/(\bceo\b|\bcfo\b|\bcto\b|diretor|decisor|sou eu quem decide|eu aprovo|head\b)/i.test(lower)) {
+                                  try {
+                                    await dispatchToCRM('create_note', {
+                                      phone,
+                                      title: 'Dado de Ouro — Decisor identificado',
+                                      description: 'Perfil/resumo indica decisor ou autoridade de compra.',
+                                      organization_id: CRM_ORGANIZATION_ID || undefined,
+                                    }, { idempotencyKey: `gold-decisor-${phone}` })
+                                  } catch {}
+                                }
+                                // Risco: sem resposta recente (se perfil trouxer lastInteraction)
+                                const lastInteraction = p.lastInteraction || p.dtUltimaAtualizacao || null
+                                if (lastInteraction) {
+                                  try {
+                                    const diff = Date.now() - Date.parse(String(lastInteraction))
+                                    if (diff > 5*24*60*60*1000) {
+                                      await dispatchToCRM('create_note', {
+                                        phone,
+                                        title: 'Alerta de Risco — Sem resposta',
+                                        description: 'Lead sem interação recente (>5 dias). Agendar follow-up.',
+                                        organization_id: CRM_ORGANIZATION_ID || undefined,
+                                      }, { idempotencyKey: `risk-stale-${phone}` })
+                                      const due = new Date(Date.now() + 24*60*60*1000).toISOString()
+                                      await dispatchToCRM('create_task', {
+                                        phone,
+                                        title: 'Follow-up — lead estagnado',
+                                        description: 'Enviar mensagem curta de retomada e valor.',
+                                        due_date: due,
+                                        organization_id: CRM_ORGANIZATION_ID || undefined,
+                                      }, { idempotencyKey: `risk-stale-task-${phone}` })
+                                    }
+                                  } catch {}
+                                }
+                            } catch (eNote) { console.warn('[index] create_note(profile) failed:', eNote?.message || eNote) }
+                        } catch (eUpd) {
+                            const msg = String(eUpd?.message || eUpd || '').toLowerCase();
+                            if (msg.includes('lead_not_found') || msg.includes('404')) {
+                                try {
+                                    await dispatchToCRM('create_lead', {
+                                        name: p.nomeDoLead || p.name || 'Lead',
+                                        company: p.nomeDoNegocio || p.businessName || '—',
+                                        phone,
+                                        organization_id: CRM_ORGANIZATION_ID || undefined,
+                                        status: 'new',
+                                        source: 'whatsapp-agent'
+                                    });
+                                    // Note mesmo após criar
+                                    try {
+                                        const title = 'Dado de Ouro — Resumo atualizado';
+                                        const description = (p.ultimoResumoDaSituacao || p.lastSummary || '').toString().slice(0, 1200) || '—';
+                                        await dispatchToCRM('create_note', { phone, title, description, organization_id: CRM_ORGANIZATION_ID || undefined }, { idempotencyKey: `gold-note-profile-${phone}-${Buffer.from(description).toString('base64').slice(0,32)}` });
+                                    } catch {}
+                                } catch (eCreate) {
+                                    console.warn('[index] create_lead failed:', eCreate?.message || eCreate);
+                                }
+                            } else {
+                                throw eUpd;
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('[index] dispatch update_lead failed:', e?.message || e);
                     }
                     return JSON.stringify({ success: true, message: "Perfil analisado e atualizado no CRM e na sessão.", updatedProfile: perfilTotalmenteAtualizado });
                 } else {
@@ -438,11 +558,11 @@ const toolExecutors = tools.reduce((acc, tool) => {
 // SYSTEM INSTRUCTION BASE DO AGENTE
 // =======================================================================================
 const system_instruction_agente_base = `
-<prompt_agente_atendimento_protecao_veicular>
+<prompt_agente_consultivo_com_ferramentas_e_adaptacao>
   <persona_e_objetivo>
     <nome_agente>${NOME_DO_AGENTE}</nome_agente>
-    <papel>Você é ${NOME_DO_AGENTE}, atendente especializado em proteção veicular. Seu objetivo é atender clientes via WhatsApp de forma clara e empática para: realizar cotações, explicar coberturas/assistências, orientar adesão (proposta e documentos), agendar vistoria e apoiar abertura e acompanhamento de sinistro.</papel>
-    <objetivo_conversa>Resolver a demanda do cliente no menor número de mensagens, mantendo clareza e cordialidade. Use as ferramentas e siga a orientação do PLANNER (cotação/onboarding e sinistro) para conduzir cada etapa.</objetivo_conversa>
+    <papel>Você é ${NOME_DO_AGENTE}, um consultor estratégico de otimização de processos altamente inteligente, proativo e adaptável. Seu objetivo principal é engajar leads (clientes potenciais) em conversas consultivas via WhatsApp, identificar profundamente suas dores e desafios operacionais, construir valor mostrando entendimento e potenciais caminhos, e, no momento oportuno, propor uma reunião como próximo passo lógico.</papel>
+    <objetivo_conversa>Ajudar o lead a resolver seus problemas, usando suas ferramentas, conhecimento e capacidade de adaptação para fornecer a melhor assistência possível. A venda ou agendamento de reunião é uma consequência de um bom atendimento e da identificação de uma necessidade real.</objetivo_conversa>
   </persona_e_objetivo>
 
   <instrucoes_de_raciocinio_e_uso_de_ferramentas>
@@ -507,23 +627,9 @@ const system_instruction_agente_base = `
     <instrucao_nova>Você pode receber mensagens tanto em formato de texto quanto de áudio. Processe o conteúdo da mensagem do lead independentemente do formato. Se for um áudio, o conteúdo estará nele. Se múltiplas mensagens forem agregadas (texto ou áudio), o conteúdo combinado será fornecido.</instrucao_nova>
   </instrucoes_gerais_de_estilo_e_tamanho_para_respostas_ao_usuario>
 
-  <fluxos_especificos_de_atendimento>
-    <cotacao>
-      - Coletar: modelo, ano, cidade/CEP, uso, condutor(es).
-      - Calcular com calculate_vehicle_protection_quote.
-      - Apresentar valor mensal, coberturas e assistências de forma simples.
-    </cotacao>
-    <adesao>
-      - Confirmar interesse; gerar proposta com generate_membership_proposal.
-      - Enviar lista de documentos e orientar pagamento.
-      - Agendar vistoria com schedule_vehicle_inspection.
-    </adesao>
-    <sinistro>
-      - Entender o ocorrido (empatia), coletar dados essenciais.
-      - Abrir com open_claim_and_get_protocol e informar protocolo e próximos passos.
-    </sinistro>
-  </fluxos_especificos_de_atendimento>
-</prompt_agente_atendimento_protecao_veicular>
+  <persona_detalhada_e_fluxo_conversacional_herdado>
+    </persona_detalhada_e_fluxo_conversacional_herdado>
+</prompt_agente_consultivo_com_ferramentas_e_adaptacao>
 `;
 // =======================================================================================
 
@@ -560,23 +666,6 @@ const generationConfig = {
 const chatSessions = {};
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-function canonicalizeTacticName(text) {
-    try {
-        return String(text || 'desconhecida').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 64) || 'desconhecida';
-    } catch {
-        return 'desconhecida';
-    }
-}
-
-function buildEligibilityCredits(sessionForReflection) {
-    // Minimal: crédito total para a tática escolhida. Caso tenha lista de táticas acionadas no turno, distribua com lambda.
-    try {
-        const chosen = sessionForReflection?.lastChosenTacticName;
-        if (chosen) return { [chosen]: 1.0 };
-    } catch {}
-    return {}; // o módulo normaliza para chosen=1.0 se vazio
-}
-
 // --- FUNÇÕES DE INTERAÇÃO COM NEO4J PARA PERFIL ---
 async function carregarOuCriarPerfilLead(userId, userName) {
     const neo4jSession = await getSession();
@@ -610,7 +699,10 @@ async function carregarOuCriarPerfilLead(userId, userName) {
              RETURN l.idWhatsapp AS idWhatsapp, l.nome AS nome, l.nomeDoNegocio AS nomeDoNegocio,
                     l.tipoDeNegocio AS tipoDeNegocio, l.nivelDeInteresseReuniao AS nivelDeInteresseReuniao,
                     l.ultimoResumoDaSituacao AS ultimoResumoDaSituacao, l.tags AS tags,
-                    l.activeHypotheses AS activeHypotheses`,
+                    l.activeHypotheses AS activeHypotheses,
+                    l.emotionalState AS emotionalState, l.emotionalConfidence AS emotionalConfidence,
+                    l.decisionProfile AS decisionProfile, l.decisionProfileSecondary AS decisionProfileSecondary,
+                    l.precallSummary AS precallSummary, l.precallQuestions AS precallQuestions`,
             { userId, userName }
         );
         if (result.records.length > 0) {
@@ -622,6 +714,12 @@ async function carregarOuCriarPerfilLead(userId, userName) {
             perfil.ultimoResumoDaSituacao = record.get('ultimoResumoDaSituacao');
             perfil.tags = record.get('tags') || [];
             perfil.activeHypotheses = record.get('activeHypotheses') || [];
+            perfil.emotionalState = record.get('emotionalState') || null;
+            perfil.emotionalConfidence = record.get('emotionalConfidence') ?? null;
+            perfil.decisionProfile = record.get('decisionProfile') || null;
+            perfil.decisionProfileSecondary = record.get('decisionProfileSecondary') || null;
+            perfil.precallSummary = record.get('precallSummary') || null;
+            perfil.precallQuestions = record.get('precallQuestions') || [];
 
             const doresResult = await neo4jSession.run('MATCH (l:Lead {idWhatsapp: $userId})-[:TEM_DOR]->(d:Dor) RETURN d.nome AS nomeDor', { userId });
             perfil.principaisDores = doresResult.records.map(r => r.get('nomeDor'));
@@ -917,22 +1015,31 @@ Hipóteses Ativas: ${sessionData.activeHypotheses.map(h => `${h.description} (Co
         if (plannerGuidanceText) {
             userMessageContentParts.push({ text: `<instrucao_do_planner_para_este_turno>\n${plannerGuidanceText}\n</instrucao_do_planner_para_este_turno>\n\n` });
         }
-        try {
-            const stepName = sessionData.planner.getCurrentStep()?.name;
-            if (stepName) {
-                const policy = (process.env.BANDIT_POLICY || 'ucb').toLowerCase();
-                const recs = await recommendTacticsForStep(stepName, { leadProfile: currentPerfilDoLead }, { policy });
-                if (recs && recs.length > 0) {
-                    const taticasTexto = recs.map(r => `- ${r.tacticName} (p≈${(r.estimatedSuccessProb*100).toFixed(0)}%, prop=${(r.propensity*100).toFixed(0)}%)`).join('\n');
-                    userMessageContentParts.push({ text: `<taticas_recomendadas_pelo_bandit>\n${taticasTexto}\n</taticas_recomendadas_pelo_bandit>\n\n` });
-                    // Guarda na sessão para logging pós-reflexão
-                    sessionData.lastBanditRecommendation = { stepName, recommended: recs, policy };
-                }
-            }
-        } catch (e) {
-            console.warn('[Bandit] Falha ao recomendar táticas:', e.message);
-        }
     }
+
+    // Modulação de tom por estado emocional e perfil de decisão
+    try {
+        const emo = (currentPerfilDoLead?.emotionalState || '').toLowerCase();
+        const dprof = (currentPerfilDoLead?.decisionProfile || '').toLowerCase();
+        const dprof2 = (currentPerfilDoLead?.decisionProfileSecondary || '').toLowerCase();
+        const toneHints = [];
+        if (emo) {
+            if (emo.includes('frustr') || emo.includes('impaciente')) toneHints.push('Seja empático, valide a frustração e ofereça solução objetiva.');
+            if (emo.includes('confuso')) toneHints.push('Seja claro e didático; use passos simples e exemplos.');
+            if (emo.includes('interess') || emo.includes('animado')) toneHints.push('Mantenha ritmo positivo e direcione para próximo passo claro.');
+            if (emo.includes('cético')) toneHints.push('Inclua evidências/prova social para aumentar confiança.');
+        }
+        const profileHints = [];
+        const allProfiles = [dprof, dprof2].filter(Boolean);
+        if (allProfiles.some(p => p.includes('analit'))) profileHints.push('Priorize dados, estruturas e benefícios quantificáveis.');
+        if (allProfiles.some(p => p.includes('emoc'))) profileHints.push('Priorize confiança, segurança e exemplos relacionáveis.');
+        if (allProfiles.some(p => p.includes('urg'))) profileHints.push('Seja conciso, direto e apresente próximo passo imediato.');
+        if (allProfiles.some(p => p.includes('cét'))) profileHints.push('Use prova social/casos e explique porquê funciona.');
+        const combinedHints = [...toneHints, ...profileHints];
+        if (combinedHints.length) {
+            userMessageContentParts.unshift({ text: `<modulacao_de_tom>\n${combinedHints.map((h,i)=>`${i+1}. ${h}`).join('\n')}\n</modulacao_de_tom>\n\n` });
+        }
+    } catch {}
     
     let combinedUserTextForLLM = "";
     let lastAudioMessageForLLM = null;
@@ -1104,7 +1211,8 @@ Hipóteses Ativas: ${sessionData.activeHypotheses.map(h => `${h.description} (Co
                     // Não era JSON, então é a resposta final do agente.
                     console.log(`[Agent Core] Resposta final do agente para ${userId} (${userName}): "${allPartsText.substring(0, 100)}..."`);
                     // Substitui [Nome do Lead] pelo nome real
-                    return allPartsText.replace(/\[Nome do Lead\]/g, userName);
+                    const cleanText = sanitizeModelOutputForUser(allPartsText).replace(/\[Nome do Lead\]/g, userName);
+                    return cleanText.trim();
                 }
             }
             
@@ -1160,6 +1268,20 @@ async function processAndRespondToMessages(client, senderId, senderName, message
                     await delay(typingDuration);
                     await client.sendText(senderId, part);
                     await client.stopTyping(senderId);
+                    // Persist outbound message (agent)
+                    try {
+                      const neo4jSession = await getSession();
+                      try {
+                        const at = Date.now();
+                        await neo4jSession.run(`
+                          MERGE (l:Lead {idWhatsapp: $id})
+                          ON CREATE SET l.nome = $name, l.dtCriacao = timestamp()
+                          WITH l
+                          CREATE (m:Message { id: $mid, text: $text, at: $at, role: 'model', direction: 'outbound' })
+                          CREATE (l)-[:HAS_MESSAGE]->(m)
+                        `, { id: senderId, name: senderName, mid: `${senderId}-${at}-${i}`, text: part, at: neo4j.int(at) });
+                      } finally { await neo4jSession.close(); }
+                    } catch (persistErr) { console.warn('[Persist Outbound] falhou:', persistErr?.message || persistErr); }
                 } catch (sendError) {
                     console.error(`[WPPConnect Send] Erro ao enviar parte da mensagem para ${senderId}:`, sendError);
                 }
@@ -1205,6 +1327,21 @@ async function processAndRespondToMessages(client, senderId, senderName, message
                 focusTypeForReflection = ReflectionFocus.LEAD_SENTIMENT_ENGAGEMENT;
             }
             
+            // Debounce/cache de reflexão: pula se não mudou contexto em janela curta
+            try {
+                const sig = buildReflectionSignature(
+                  lastAgentMsgForReflection,
+                  lastUserMsgForReflection,
+                  currentPlannerStateForReflection,
+                  currentProfileForReflection
+                );
+                if (shouldSkipReflection(senderId, sig)) {
+                    console.log(`[Reflexão] Ignorada (cache) para ${senderId} — assinatura repetida em janela curta.`);
+                    return; // evita reflexão redundante
+                }
+                markReflection(senderId, sig);
+            } catch (e) { console.warn('[Reflexão] Falha no debounce/cache:', e?.message || e); }
+
             console.log(`[Reflexão] Solicitando reflexão para ${senderId} com foco: ${focusTypeForReflection}`);
             
             const previousReflectionsForPrompt = sessionForReflection.reflectionHistory || [];
@@ -1219,44 +1356,28 @@ async function processAndRespondToMessages(client, senderId, senderName, message
                 focusTypeForReflection,
                 previousReflectionsForPrompt, // Passa o histórico de reflexões anteriores
                 activeHypothesesForPrompt // Passa as hipóteses ativas
-            ).then(async (reflectionResult) => {
+            ).then(reflectionResult => {
                 if (reflectionResult && !reflectionResult.error) {
                     console.log(`[Reflexão Sucesso - ${senderId}] Resumo: ${reflectionResult.resumoDaReflexao || 'N/A'}`);
                     // console.log("[Reflexão Detalhada]:", JSON.stringify(reflectionResult, null, 2));
 
                     // 1. Adicionar dados ao Analytics Tracker
-                    const stepName = currentPlannerStateForReflection?.currentStep?.name || 'N/A';
-                    const agentAction = canonicalizeTacticName(reflectionResult.acaoPrincipalRealizadaPeloAgente || 'N/A');
-                    const successBool = reflectionResult.objetivoDaEtapaDoPlannerAvancou === true;
                     globalAnalyticsTracker.addReflectionData({
                         leadId: senderId,
                         leadName: senderName,
                         leadType: currentProfileForReflection.tipoDeNegocio, // Exemplo
                         planName: currentPlannerStateForReflection?.selectedPlanName || 'N/A',
-                        stepName: stepName,
-                        agentAction: agentAction,
-                        stepGoalAchieved: successBool, // Garante boolean
+                        stepName: currentPlannerStateForReflection?.currentStep?.name || 'N/A',
+                        agentAction: reflectionResult.acaoPrincipalRealizadaPeloAgente || 'N/A',
+                        stepGoalAchieved: reflectionResult.objetivoDaEtapaDoPlannerAvancou === true, // Garante boolean
                         inferredLeadSentiment: reflectionResult.sentimentoInferidoDoLead,
+                        sentimentConfidenceLabel: reflectionResult.confiancaSentimentoLead || null,
+                        sentimentConfidenceScore: typeof reflectionResult.confidenceScore === 'number' ? reflectionResult.confidenceScore : null,
                         tacticRepetitionDetected: reflectionResult.sinalizadorRepeticaoTatica?.detectada || false,
                         hypothesisStatus: reflectionResult.hipotesesAtualizadas?.find(h => h.status === 'confirmada' || h.status === 'descartada')?.status, // Exemplo simples
                         previousReflectionEvaluation: reflectionResult.avaliacaoDeReflexaoAnterior?.eficaz !== undefined ? (reflectionResult.avaliacaoDeReflexaoAnterior.eficaz ? 'eficaz' : 'nao_eficaz') : undefined,
                         rawReflection: reflectionResult // Armazena a reflexão completa
                     });
-
-                    // Atualiza Bandit Beta/decay com crédito da ação do agente
-                    try {
-                        const eligibility = buildEligibilityCredits(sessionForReflection);
-                        await updateAfterReflection({
-                            leadId: senderId,
-                            stepName,
-                            tacticName: agentAction,
-                            success: successBool,
-                            recommendation: sessionForReflection.lastBanditRecommendation || null,
-                            eligibility
-                        });
-                    } catch (e) {
-                        console.warn('[Bandit] Falha ao atualizar após reflexão:', e.message);
-                    }
 
                     // 2. Atualizar histórico de reflexões na sessão
                     sessionForReflection.reflectionHistory.push(reflectionResult);
@@ -1275,40 +1396,6 @@ async function processAndRespondToMessages(client, senderId, senderName, message
                         }
                     }
 
-                    // 6. Tools engine: avaliar e executar tools após reflexão
-                    try {
-                        evaluateAndRunTools({
-                            eventType: 'afterReflection',
-                            leadProfile: currentPerfilDoLead || sessionForReflection.perfil,
-                            reflectionResult,
-                            threshold: parseFloat(process.env.TOOL_DEFAULT_THRESHOLD || '0.75')
-                        }).catch(err => console.error('[ToolsEngine] Erro em evaluateAndRunTools:', err));
-                    } catch (te) {
-                        console.error('[ToolsEngine] Exceção ao acionar tools:', te);
-                    }
-
-                    // 7. Workflows engine: avaliar e executar workflows após reflexão
-                    try {
-                        evaluateAndRunWorkflows({
-                            eventType: 'afterReflection',
-                            leadProfile: currentPerfilDoLead || sessionForReflection.perfil,
-                            reflectionResult
-                        }).catch(err => console.error('[WorkflowsEngine] Erro em evaluateAndRunWorkflows:', err));
-                    } catch (we) {
-                        console.error('[WorkflowsEngine] Exceção ao acionar workflows:', we);
-                    }
-
-                    // 8. Emitir evento para n8n (se configurado)
-                    try {
-                        sendN8nEvent('afterReflection', {
-                            leadId: senderId,
-                            leadName: senderName,
-                            leadProfile: currentPerfilDoLead || sessionForReflection.perfil,
-                            reflectionResult
-                        }).catch(err => console.error('[n8n] Erro no envio:', err));
-                    } catch (ne) {
-                        console.error('[n8n] Exceção ao enviar evento:', ne);
-                    }
                     // 4. Considerar sugestão de mudança de plano (exemplo de lógica)
                     if (reflectionResult.sugestaoAlteracaoPlano?.necessaria && sessionForReflection.planner) {
                         console.warn(`[Reflexão - ${senderId}] SUGESTÃO DE MUDANÇA DE PLANO: Para '${reflectionResult.sugestaoAlteracaoPlano.novoPlanoSugerido}'. Justificativa: ${reflectionResult.sugestaoAlteracaoPlano.justificativa}`);
@@ -1323,6 +1410,194 @@ async function processAndRespondToMessages(client, senderId, senderName, message
                         console.log(`[Reflexão - ${senderId}] SUGESTÃO DE MICROPERSONA: Cluster '${reflectionResult.sugestaoMicropersona.clusterIdentificado}', Ajuste: '${reflectionResult.sugestaoMicropersona.ajusteSugeridoNaPersonaAgente}'`);
                     }
 
+                    // 6. Assistir o Planner com base na reflexão (auto-avançar se aderente)
+                    try {
+                        if (sessionForReflection.planner) {
+                            const fit = reflectionResult.stepFit;
+                            const avancou = reflectionResult.objetivoDaEtapaDoPlannerAvancou === true;
+                            if ((fit && fit.matchesStep) || avancou) {
+                                const ok = sessionForReflection.planner.completeCurrentStepWithReason('reflection_fit');
+                                if (ok) console.log(`[Planner Assist] Etapa atual concluída por reflexão para ${senderId}.`);
+                            } else if (fit && Array.isArray(fit.missingInfo) && fit.missingInfo.length > 0) {
+                                // Cria uma tarefa leve para coletar a primeira informação faltante
+                                const firstMissing = String(fit.missingInfo[0] || '').trim();
+                                if (firstMissing) {
+                                    (async () => { try {
+                                        const phone = String(senderId || '').replace(/\D/g, '');
+                                        const title = `Coletar: ${firstMissing}`;
+                                        const description = `Reflexão indicou dados ausentes: ${fit.missingInfo.slice(0,3).join(', ')}`;
+                                        const due = new Date(Date.now() + 24*60*60*1000).toISOString();
+                                        await dispatchToCRM('create_task', { phone, title, description, due_date: due });
+                                        console.log('[Planner Assist] Tarefa criada para coletar informação ausente:', firstMissing);
+                                    } catch (eTask) { console.warn('[Planner Assist] Falha ao criar tarefa de coleta:', eTask?.message || eTask); } })();
+                                }
+                            }
+                        }
+                    } catch (eAssist) { console.warn('[Planner Assist] erro:', eAssist?.message || eAssist); }
+
+                    // 6.1 Persistir INSIGHT de follow-up no Supabase (via API local)
+                    (async () => {
+                      try {
+                        const s = await getSession();
+                        let lastInboundAt = null, lastOutboundAt = null, openTasks = [];
+                        try {
+                          const r = await s.run(`
+                            MATCH (l:Lead {idWhatsapp: $id})
+                            OPTIONAL MATCH (l)-[:HAS_MESSAGE]->(m:Message)
+                            WITH l, m
+                            ORDER BY m.at DESC
+                            WITH l,
+                                 max(CASE WHEN m.role='user' THEN m.at END) AS lastInboundAt,
+                                 max(CASE WHEN m.role='model' THEN m.at END) AS lastOutboundAt
+                            OPTIONAL MATCH (l)-[:HAS_TASK]->(t:Task)
+                            WITH l, lastInboundAt, lastOutboundAt, collect(CASE WHEN t.status='open' THEN t ELSE NULL END) AS openTasks
+                            RETURN lastInboundAt, lastOutboundAt, openTasks
+                          `, { id: senderId });
+                          if (r.records.length) {
+                            lastInboundAt = r.records[0].get('lastInboundAt') || null;
+                            lastOutboundAt = r.records[0].get('lastOutboundAt') || null;
+                            const _tasks = r.records[0].get('openTasks') || [];
+                            openTasks = _tasks.map(t => ({ id: String(t.properties?.id || ''), title: String(t.properties?.title || ''), dueAt: Number(t.properties?.dueAt || 0) || null }));
+                          }
+                        } catch (_) {}
+                        finally { await s.close(); }
+
+                        const now = Date.now();
+                        const hoursSince = (ts) => ts ? (now - Number(ts)) / 36e5 : Infinity;
+                        const hIn = hoursSince(lastInboundAt);
+                        const hOut = hoursSince(lastOutboundAt);
+                        const overdue = openTasks.some(t => Number(t.dueAt||0) && Number(t.dueAt) < now);
+                        const reasons = [];
+                        if (!lastInboundAt && Number.isFinite(hOut) && hOut > 0) reasons.push('silence');
+                        if (hIn > 48) reasons.push('stage_stale');
+                        if (overdue) reasons.push('task_due');
+
+                        // Alta intenção (heurística simples): olha reflexão + última mensagem do lead
+                        const txt = `${String(lastUserMsgForReflection||'')} ${JSON.stringify(reflectionResult||{})}`.toLowerCase();
+                        const hiIntent = /(proposta|orçamento|orcamento|desconto|marcar|reuni[aã]o|contrato)/.test(txt);
+                        if (hiIntent) reasons.unshift('high_intent');
+
+                        let priority = 3;
+                        if (reasons.includes('high_intent')) priority = 1;
+                        else if (reasons.includes('task_due')) priority = 2;
+                        else if (reasons.includes('stage_stale') || reasons.includes('silence')) priority = 3;
+                        else priority = 4;
+
+                        const insight = {
+                          sentimento: reflectionResult.sentimentoInferidoDoLead || null,
+                          sentimento_confianca: reflectionResult.confiancaSentimentoLead || null,
+                          sentimento_score: typeof reflectionResult.confidenceScore === 'number' ? reflectionResult.confidenceScore : null,
+                          emocao: reflectionResult.emocaoInferida || null,
+                          emocao_score: typeof reflectionResult.emocaoConfianca === 'number' ? reflectionResult.emocaoConfianca : null,
+                          intencao: reflectionResult.intencaoDetectada || (hiIntent ? 'alta' : null),
+                          nivel_consciencia: reflectionResult.nivelDeConsciencia || null,
+                          consciencia_score: typeof reflectionResult.conscienciaConfianca === 'number' ? reflectionResult.conscienciaConfianca : null,
+                          proxima_acao: reflectionResult.proximoPassoLogicoSugerido || null,
+                          mensagem_sugerida: reflectionResult.mensagemSugerida || null,
+                          canal_recomendado: reflectionResult.canalRecomendado || 'whatsapp',
+                          intencao_detectada: hiIntent ? 'alta' : 'desconhecida',
+                          contexto: {
+                            tempo_desde_ultimo_inbound_h: Number.isFinite(hIn) ? Math.round(hIn) : null,
+                            tempo_desde_ultimo_outbound_h: Number.isFinite(hOut) ? Math.round(hOut) : null,
+                            tarefas_vencidas: openTasks.filter(t => Number(t.dueAt||0) && Number(t.dueAt) < now).length,
+                          },
+                          evidencias: {
+                            razoes: reasons,
+                            ultima_frase_user: String(lastUserMsgForReflection || '').slice(0, 140) || null,
+                            ultima_frase_agente: String(lastAgentMsgForReflection || '').slice(0, 140) || null,
+                          },
+                          recomendacao: {
+                            tipo_followup: hiIntent ? 'Intencao' : 'Reengajamento',
+                            canal: 'whatsapp',
+                            justificativa_prioridade: hiIntent ? 'Alta intenção detectada' : (overdue ? 'Tarefa vencida' : (hIn>48?'Inatividade detectada':'Regra padrão')),
+                            guardrails_aplicados: ['quiet_hours','cooldown','ab_test']
+                          }
+                        };
+
+                        const baseDash = `http://localhost:${process.env.DASHBOARD_PORT || 3005}`;
+                        const fetch = (await import('node-fetch')).default;
+                        const payload = {
+                          organization_id: process.env.CRM_ORGANIZATION_ID || null,
+                          lead_wa_id: senderId,
+                          priority,
+                          insight
+                        };
+                        try {
+                          const resp = await fetch(`${String(baseDash).replace(/\/$/,'')}/api/followups/insights`, {
+                            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+                          });
+                          if (!resp.ok) {
+                            const t = await resp.text().catch(()=> '');
+                            console.warn('[Insights] persist failed:', resp.status, t);
+                          }
+                        } catch (e) { console.warn('[Insights] post error:', e?.message || e); }
+                      } catch (e) {
+                        console.warn('[Insights] pipeline error:', e?.message || e);
+                      }
+                    })();
+
+                    // 6. Enviar "Dado de Ouro — Reflexão" para o CRM como nota (JSON estruturado)
+                    (async () => {
+                      try {
+                        const now = Date.now();
+                        sessionForReflection.lastReflectionNoteAt = sessionForReflection.lastReflectionNoteAt || 0;
+                        const MIN_NOTE_INTERVAL_MS = 2 * 60 * 1000; // 2 minutos para evitar spam
+                        if (now - sessionForReflection.lastReflectionNoteAt > MIN_NOTE_INTERVAL_MS) {
+                            const phone = String(senderId || '').replace(/\D/g, '');
+                            const title = `Dado de Ouro — Reflexão${(typeof focusTypeForReflection === 'string' && focusTypeForReflection) ? ` (${focusTypeForReflection})` : ''}`;
+                            const description = JSON.stringify({
+                                foco: focusTypeForReflection,
+                                resumo: reflectionResult.resumoDaReflexao || null,
+                                proximaPerguntaDeAltoValor: reflectionResult.proximaPerguntaDeAltoValor || null,
+                                proximoPassoLogicoSugerido: reflectionResult.proximoPassoLogicoSugerido || null,
+                                sentimentoInferidoDoLead: reflectionResult.sentimentoInferidoDoLead || null,
+                                confiancaSentimentoLead: reflectionResult.confiancaSentimentoLead || null,
+                                confidenceScore: typeof reflectionResult.confidenceScore === 'number' ? reflectionResult.confidenceScore : null,
+                                stepFit: reflectionResult.stepFit || null,
+                                principaisPontosDeAtencao: Array.isArray(reflectionResult.principaisPontosDeAtencao) ? reflectionResult.principaisPontosDeAtencao.slice(0,3) : [],
+                                raw: reflectionResult
+                            });
+                            const idem = `gold-reflection-${phone}-${Buffer.from((reflectionResult.resumoDaReflexao || '')).toString('base64').slice(0,32)}`;
+                            await dispatchToCRM('create_note', { phone, title, description }, { idempotencyKey: idem });
+                            sessionForReflection.lastReflectionNoteAt = now;
+                        }
+                      } catch (eNote) {
+                        console.warn(`[Reflexão] Falha ao enviar nota de reflexão para CRM (${senderId}):`, eNote?.message || eNote);
+                      }
+                    })();
+
+                    // 7. Disparar evento pós-reflexão para o mecanismo de ferramentas
+                    try {
+                        const { evaluateAndRunTools } = require('./toolsEngine');
+                        const leadProfile = { idWhatsapp: senderId, ...(sessionForReflection?.perfil || {}) };
+                        evaluateAndRunTools({ eventType: 'afterReflection', leadProfile, reflectionResult })
+                          .catch(e => console.warn('[afterReflection] tools error:', e?.message || e));
+                    } catch (e) {
+                        console.warn('[afterReflection] dispatch failed:', e?.message || e);
+                    }
+
+                    // 8. Se houver metas off_track, emitir evento goalBreach para acionar automações
+                    try {
+                        const goalsEngine = require('./goalsEngine');
+                        const snaps = (typeof goalsEngine.getSnapshots === 'function') ? goalsEngine.getSnapshots() : [];
+                        const latestById = new Map();
+                        for (const s of snaps) {
+                            const prev = latestById.get(s.id);
+                            if (!prev || Number(s.at||0) > Number(prev.at||0)) latestById.set(s.id, s);
+                        }
+                        const off = Array.from(latestById.values()).filter(s => s.status === 'off_track').slice(0, 3);
+                        if (off.length) {
+                            const { evaluateAndRunTools } = require('./toolsEngine');
+                            const leadProfile = { idWhatsapp: senderId, ...(sessionForReflection?.perfil || {}) };
+                            for (const g of off) {
+                                evaluateAndRunTools({ eventType: 'goalBreach', leadProfile, reflectionResult, goal: { id: g.id, value: g.value, target: g.target, direction: g.direction } })
+                                  .catch(e => console.warn('[goalBreach] tools error:', e?.message || e));
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('[goalBreach] dispatch failed:', e?.message || e);
+                    }
+
 
                 } else if (reflectionResult && reflectionResult.error) {
                     console.error(`[Reflexão Falha - ${senderId}] Erro: ${reflectionResult.error}`, reflectionResult.details || '');
@@ -1332,6 +1607,36 @@ async function processAndRespondToMessages(client, senderId, senderName, message
             });
         }
         // --- FIM DA LÓGICA DE REFLEXÃO PÓS-TURNO ---
+
+        // --- ANÁLISE AUTOMÁTICA DE PERFIL (FALLBACK, SEM DEPENDER DO GEMINI) ---
+        try {
+            if (sessionForReflection) {
+                const now = Date.now();
+                const MIN_INTERVAL_MS = 2 * 60 * 1000; // evita chamadas a cada turno
+                sessionForReflection.lastProfileAnalysisAt = sessionForReflection.lastProfileAnalysisAt || 0;
+                if (now - sessionForReflection.lastProfileAnalysisAt > MIN_INTERVAL_MS) {
+                    const fullChatHist = sessionForReflection.chat ? await sessionForReflection.chat.getHistory() : [];
+                    const analysisResultStr = await toolExecutors["analyze_and_update_lead_profile"]({
+                        leadId: senderId,
+                        fullChatHistoryArray: fullChatHist,
+                        currentConceptualProfileObject: sessionForReflection.perfil
+                    });
+                    try {
+                        const analysisResult = typeof analysisResultStr === "string" ? JSON.parse(analysisResultStr) : analysisResultStr;
+                        if (analysisResult && analysisResult.updatedProfile) {
+                            sessionForReflection.perfil = analysisResult.updatedProfile;
+                            console.log(`[AutoProfile] Perfil de ${senderId} atualizado automaticamente após turno.`);
+                        }
+                    } catch (parseErr) {
+                        console.warn(`[AutoProfile] Falha ao parsear resultado da análise automática de perfil para ${senderId}.`, parseErr.message);
+                    }
+                    sessionForReflection.lastProfileAnalysisAt = now;
+                }
+            }
+        } catch (autoErr) {
+            console.error(`[AutoProfile] Erro ao executar análise automática de perfil para ${senderId}:`, autoErr);
+        }
+        // --- FIM DA ANÁLISE AUTOMÁTICA DE PERFIL ---
 
     } else {
         console.log(`[Process Msg] Nenhuma resposta gerada pelo Agente para ${senderId}. Não haverá reflexão.`);
@@ -1370,26 +1675,6 @@ async function startBot() {
     });
     console.log(`[WPPConnect] Cliente '${client.session}' iniciado.`);
 
-    const { dispatchToCRM, wasProcessed, markProcessed, CRM_ORGANIZATION_ID } = require('./crmBridge')
-    const { MeaningSupervisor } = require('./meaningSupervisor')
-    const { Planner } = require('./planner')
-    const MEANING_API_KEY = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY
-    const ms = new MeaningSupervisor(MEANING_API_KEY)
-
-    function parseDueDateFromText(text) {
-      try {
-        const t = String(text || '').toLowerCase()
-        const now = new Date()
-        if (/(hoje|agora|ainda hoje)/.test(t)) return now.toISOString()
-        if (/(amanh[ãa]|amanha)/.test(t)) { const d = new Date(now.getTime() + 24*60*60*1000); return d.toISOString() }
-        if (/(semana que vem|pr[óo]xima semana)/.test(t)) { const d = new Date(now.getTime() + 7*24*60*60*1000); return d.toISOString() }
-        // simples: hh:mm hoje
-        const m = t.match(/\b([0-2]?\d)[:h]([0-5]\d)\b/)
-        if (m) { const d = new Date(now); d.setHours(Number(m[1]||0)); d.setMinutes(Number(m[2]||0)); d.setSeconds(0); return d.toISOString() }
-      } catch {}
-      return undefined
-    }
-
     client.onMessage(async (message) => {
       console.log('--------------------------------------------------');
       const senderName = message.sender.pushname || message.sender.verifiedName || message.notifyName || "Lead";
@@ -1404,14 +1689,14 @@ async function startBot() {
         return;
       }
 
-      // Idempotência por messageId
-      const msgId = message?.id?.toString?.() || message?.id || null
-      if (msgId && wasProcessed(msgId)) {
-        console.log(`[Idempotency] Mensagem ${msgId} já processada. Ignorando.`)
-        return
-      }
-
       let userMessagePayload = null;
+
+      // Dispara tool assíncrona: enfileirar análise emocional
+      try {
+        const { evaluateAndRunTools } = require('./toolsEngine');
+        const leadProfile = { idWhatsapp: senderId };
+        await evaluateAndRunTools({ eventType: 'afterMessage', leadProfile, messageText: message.body || '' });
+      } catch (e) { console.warn('[afterMessage] enqueue emotion failed:', e?.message || e) }
 
       // Comandos de administração/debug
       if (message.type === 'chat' && message.body) {
@@ -1509,76 +1794,6 @@ async function startBot() {
         }
       }
 
-      // Interpretação + Planner → intent do CRM
-      try {
-        const userText = message?.body || ''
-        const session = chatSessions[senderId] || {}
-        const profile = session.perfil || await carregarOuCriarPerfilLead(senderId, senderName)
-        if (session && !session.perfil) session.perfil = profile
-
-        const interpretations = await ms.getLatentInterpretations(userText, profile, session.chat?.history || [])
-        const top = (interpretations || [])[0] || null
-
-        // Threshold simples
-        const conf = Number(top?.confidenceScore || 0)
-        const intentCandidates = []
-        const thresholds = { budget: 0.55, schedule: 0.6, createLead: 0.7, boleto: 0.55, cancel: 0.5, complaint: 0.5, call: 0.5, close: 0.65 }
-        const it = String(top?.interpretation || '').toLowerCase()
-        const textLow = userText.toLowerCase()
-
-        // Orçamento/Proposta → nota
-        if (conf >= thresholds.budget && (/orçamento|orcamento|proposta|preço|preco/.test(it) || /orçamento|orcamento|proposta|preço|preco/.test(textLow))) {
-          intentCandidates.push({ name: 'create_note', payload: { phone: senderId, title: 'Pedido de orçamento', description: userText, organization_id: CRM_ORGANIZATION_ID || undefined } })
-        }
-        // Agendamento → tarefa (com due_date quando detectável)
-        if (conf >= thresholds.schedule && (/agendar|reunião|reuniao|marcar/.test(it) || /agendar|reunião|reuniao|marcar/.test(textLow))) {
-          intentCandidates.push({ name: 'create_task', payload: { phone: senderId, title: 'Agendar reunião', description: userText, due_date: parseDueDateFromText(userText), organization_id: CRM_ORGANIZATION_ID || undefined } })
-        }
-        // 2ª via de boleto → tarefa hoje
-        if (conf >= thresholds.boleto && (/boleto|2ª via|segunda via|segunda-via|2 via/.test(it) || /boleto|2ª via|segunda via|segunda-via|2 via/.test(textLow))) {
-          intentCandidates.push({ name: 'create_task', payload: { phone: senderId, title: 'Enviar 2ª via de boleto', description: userText, due_date: parseDueDateFromText('hoje'), organization_id: CRM_ORGANIZATION_ID || undefined } })
-        }
-        // Cancelamento → nota
-        if (conf >= thresholds.cancel && (/cancelar|cancelamento/.test(it) || /cancelar|cancelamento/.test(textLow))) {
-          intentCandidates.push({ name: 'create_note', payload: { phone: senderId, title: 'Solicitação de cancelamento', description: userText, organization_id: CRM_ORGANIZATION_ID || undefined } })
-        }
-        // Reclamação → nota
-        if (conf >= thresholds.complaint && (/reclama|reclamação|insatisfeito|ruim|p[ée]ssimo/.test(it) || /reclama|reclamação|insatisfeito|ruim|p[ée]ssimo/.test(textLow))) {
-          intentCandidates.push({ name: 'create_note', payload: { phone: senderId, title: 'Reclamação', description: userText, organization_id: CRM_ORGANIZATION_ID || undefined } })
-        }
-        // Pedir ligação → tarefa
-        if (conf >= thresholds.call && (/(me liga|ligar|ligação|telefone)/.test(it) || /(me liga|ligar|ligação|telefone)/.test(textLow))) {
-          intentCandidates.push({ name: 'create_task', payload: { phone: senderId, title: 'Ligar para o lead', description: userText, due_date: parseDueDateFromText('hoje'), organization_id: CRM_ORGANIZATION_ID || undefined } })
-        }
-        // Intenção de fechar → mover estágio/atualizar lead
-        if (conf >= thresholds.close && (/fechar|contratar|quero comprar|seguir com/.test(it) || /fechar|contratar|quero comprar|seguir com/.test(textLow))) {
-          intentCandidates.push({ name: 'update_lead', payload: { phone: senderId, status: 'negotiation' } })
-        }
-        // Criação de lead (dados identificáveis)
-        if (conf >= thresholds.createLead && (/sou|meu nome|empresa|cnpj/.test(textLow)) && CRM_ORGANIZATION_ID) {
-          intentCandidates.push({ name: 'create_lead', payload: { organization_id: CRM_ORGANIZATION_ID, name: senderName, company: '—', phone: senderId.replace(/\D/g, ''), source: 'whatsapp', status: 'new', tags: ['whatsapp'], notes: userText } })
-        }
-        // Fallback moderado: se conf entre 0.4-0.6 e nada mapeou, registra nota genérica
-        if (!intentCandidates.length && conf >= 0.4) {
-          intentCandidates.push({ name: 'create_note', payload: { phone: senderId, title: 'Anotação automática', description: userText, organization_id: CRM_ORGANIZATION_ID || undefined } })
-        }
-
-        // Decisão: se houver candidato, dispare o primeiro (pode evoluir para bandit)
-        if (intentCandidates.length) {
-          const pick = intentCandidates[0]
-          await dispatchToCRM(pick.name, pick.payload, { idempotencyKey: msgId })
-          console.log(`[CRM Dispatch] ${pick.name} enviado via interpretação para ${senderId}`)
-        }
-
-        // Atualiza planner e avalia progresso
-        if (!session.planner) session.planner = new Planner(profile)
-        session.planner.checkAndUpdateProgress(profile)
-      } catch (e) {
-        console.error('[Meaning/Planner -> CRM] erro:', e)
-      }
-
-      if (msgId) markProcessed(msgId)
-
       // Processamento normal de mensagens
       if (message.type === 'chat' && message.body) {
         await client.sendSeen(senderId); // Marca como lida
@@ -1586,6 +1801,43 @@ async function startBot() {
             id: message.id.toString(), type: 'text', content: message.body.trim(),
             senderId: senderId, senderName: senderName, timestamp: message.timestamp || Math.floor(Date.now() / 1000)
         };
+
+        // EXTRAÇÃO COM PERFIL DEFINIDO (Config) — Rápido + Inteligente
+        try {
+          const profileDef = await getExtractionProfileCached();
+          if (profileDef && message.body) {
+            const light = runLightExtraction(profileDef, message.body);
+            let smart = {};
+            try {
+              const smartFields = (profileDef.fields||[]).filter(f => String(f.source||'pattern') === 'llm');
+              if (smartFields.length) {
+                smart = await runSmartExtractionLLM(smartFields, message.body, profileDef.instructions||'');
+              }
+            } catch(e) { console.warn('[Extraction LLM] failed:', e?.message || e) }
+            const extracted = { ...light, ...smart };
+            if (extracted && Object.keys(extracted).length) {
+              // Merge no perfil local + persistência best-effort via CRM bridge
+              const currentProfile = await carregarOuCriarPerfilLead(senderId, senderName).catch(()=>null);
+              const updated = { ...(currentProfile||{}), ...extracted, dtUltimaAtualizacao: new Date().toISOString() };
+              if (chatSessions[senderId]) chatSessions[senderId].perfil = updated;
+              // Notifica CRM com nota "Dado de Ouro — Extração"
+              try {
+                const phone = String(senderId||'').replace(/\D/g,'');
+                await dispatchToCRM('create_note', {
+                  phone,
+                  title: 'Dado de Ouro — Extração',
+                  description: JSON.stringify({ extracted })
+                }, { idempotencyKey: `gold-extract-${phone}-${Object.keys(extracted).sort().join('-').slice(0,40)}` })
+              } catch(e){ console.warn('[Extraction->CRM] note failed:', e?.message || e) }
+              // Assiste planner com novo perfil
+              try {
+                if (chatSessions[senderId] && chatSessions[senderId].planner) {
+                  chatSessions[senderId].planner.checkAndUpdateProgress(updated);
+                }
+              } catch(e){ console.warn('[Extraction->Planner] failed:', e?.message || e) }
+            }
+          }
+        } catch(e) { console.warn('[Extraction] pipeline error:', e?.message || e) }
       } else if ((message.type === 'ptt' || message.type === 'audio') && message.mediaKey) {
         // Lógica para baixar e processar áudio (requer descriptografia e conversão)
         try {
@@ -1606,6 +1858,24 @@ async function startBot() {
         console.log(`[Filtro] Mensagem de tipo '${message.type}' de ${senderId} não processável.`);
         return;
       }
+
+      // Persist inbound message (user)
+      try {
+        const neo4jSession = await getSession();
+        try {
+          const at = Number(message.timestamp ? (message.timestamp * 1000) : Date.now());
+          const text = message.body || '';
+          if (text && !message.fromMe && !message.isStatusMsg && !message.isGroupMsg) {
+            await neo4jSession.run(`
+              MERGE (l:Lead {idWhatsapp: $id})
+              ON CREATE SET l.nome = $name, l.dtCriacao = timestamp()
+              WITH l
+              CREATE (m:Message { id: $mid, text: $text, at: $at, role: 'user', direction: 'inbound' })
+              CREATE (l)-[:HAS_MESSAGE]->(m)
+            `, { id: senderId, name: senderName, mid: String(message.id || `${senderId}-${at}`), text, at: neo4j.int(at) });
+          }
+        } finally { await neo4jSession.close(); }
+      } catch (e) { console.warn('[Persist Inbound] falhou:', e?.message || e); }
 
       // Lógica de Debounce
       if (userMessagePayload) {
@@ -1756,6 +2026,15 @@ async function popularSocialProofData() {
 
 startBot();
 
+// Auto-start do FollowUp Scheduler para processar FollowUps agendados
+try {
+    const { start: startFollowUpScheduler } = require('./followUpScheduler');
+    startFollowUpScheduler();
+    console.log('[FollowUpScheduler] started (auto)');
+} catch (e) {
+    console.error('[FollowUpScheduler] auto-start failed:', e?.message || e);
+}
+
 // --- ROTINAS DE ENCERRAMENTO GRACIOSO ---
 async function gracefulShutdown() {
   console.log('\n[Sistema] Recebido sinal para encerrar. Fechando conexões e cliente WhatsApp...');
@@ -1799,4 +2078,44 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('!!!!!!!!!! Rejeição de Promise não tratada: !!!!!!!!!!', reason);
   // Considerar um gracefulShutdown
 });
+
+module.exports = { popularEsquemasIniciais, popularSocialProofData };
+
+// === UTIL: Remove marcadores internos (PENSAMENTO, AÇÃO, OBSERVAÇÃO) da resposta ===
+function sanitizeModelOutputForUser(rawText) {
+    if (!rawText) return rawText;
+    const lines = rawText.split(/\r?\n/);
+    const filtered = lines.filter(line => {
+        const l = line.trim().toLowerCase();
+        return !(l.startsWith('pensamento') || l.startsWith('ação') || l.startsWith('acao') || l.startsWith('observação') || l.startsWith('observacao') || l.startsWith('thought') || l.startsWith('action') || l.startsWith('observation'));
+    });
+    return filtered.join('\n').replace(/\n{3,}/g, '\n\n'); // evita múltiplas linhas vazias
+}
+
+// Envio simples de texto via WPPConnect + persistência no Neo4j (exportado para API)
+async function sendWhatsAppText(waJid, text, options = {}) {
+    const wpp = require('@wppconnect-team/wppconnect');
+    const client = (wpp && wpp.clientsArray && wpp.clientsArray[0]) || null;
+    if (!client) throw new Error('wpp_client_unavailable');
+    const leadId = String(waJid);
+    const leadName = options.leadName || 'Lead';
+    await client.sendText(leadId, String(text || ''));
+    try {
+        const { getSession } = require('./db_neo4j');
+        const neo4j = require('neo4j-driver');
+        const s = await getSession();
+        try {
+            const at = Date.now();
+            await s.run(`
+              MERGE (l:Lead {idWhatsapp: $id})
+              ON CREATE SET l.nome = $name, l.dtCriacao = timestamp()
+              WITH l
+              CREATE (m:Message { id: $mid, text: $text, at: $at, role: 'model', direction: 'outbound' })
+              CREATE (l)-[:HAS_MESSAGE]->(m)
+              SET l.lastOutboundAt = $at, l.dtUltimaAtualizacao = timestamp()
+            `, { id: leadId, name: leadName, mid: `${leadId}-${at}`, text: String(text||''), at: neo4j.int(at) });
+        } finally { await s.close(); }
+    } catch {}
+    return { ok: true };
+}
 

@@ -1,11 +1,16 @@
-// Update this page (the content is just a fallback if you fail to update the page)
+import { useState } from 'react'
+import ReflectionAnalytics from '@/components/analytics/ReflectionAnalytics'
 
 const Index = () => {
+  const [plan] = useState('LeadQualificationToMeeting')
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background">
-      <div className="text-center">
-        <h1 className="text-4xl font-bold mb-4">Welcome to Your Blank App</h1>
-        <p className="text-xl text-muted-foreground">Start building your amazing project here!</p>
+    <div className="min-h-screen p-6">
+      <div className="max-w-6xl mx-auto space-y-6">
+        <div>
+          <h1 className="text-2xl font-semibold">Kora Dashboard</h1>
+          <p className="text-sm text-muted-foreground">Métricas e logs de reflexão do agente</p>
+        </div>
+        <ReflectionAnalytics defaultPlan={plan} />
       </div>
     </div>
   );
