@@ -1,0 +1,42 @@
+{
+  "opening": {
+    "direto": [
+      "Vamos direto ao ponto: {pergunta_principal}",
+      "Entendi. Para avançarmos, preciso de {dado_chave}."
+    ],
+    "caloroso": [
+      "Claro! Obrigado por compartilhar. {pergunta_principal}",
+      "Perfeito, estou aqui pra ajudar. {pergunta_principal}"
+    ],
+    "consultivo": [
+      "Pelo que descreveu, há dois caminhos. Antes, {pergunta_principal}",
+      "Faz sentido. Para acertarmos no diagnóstico, {pergunta_principal}"
+    ]
+  },
+  "body": {
+    "evidencias": [
+      "Em casos similares, observamos {dado_1} e {dado_2}.",
+      "Tipicamente, {benchmark_curto}."
+    ],
+    "exemplos": [
+      "Ex.: cliente X tinha {problema} e, com {acao}, reduziu {impacto}.",
+      "Outro caso: em {segmento}, {resultado} em {tempo}."
+    ],
+    "perguntas_exploratorias": [
+      "Pode me confirmar {fato_1}?",
+      "Tem algum prazo correndo ou restrição específica?"
+    ]
+  },
+  "cta": {
+    "soft_close": [
+      "Que tal uma conversa rápida de 20–30 min para alinharmos?",
+      "Posso sugerir 2–3 horários e vemos o melhor pra você?"
+    ],
+    "direto": [
+      "Podemos marcar ainda esta semana? {slots_opcionais}",
+      "Se fizer sentido, avanço com o agendamento agora."
+    ]
+  }
+}
+
+

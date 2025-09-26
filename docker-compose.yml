@@ -1,0 +1,65 @@
+version: '3.9'
+
+services:
+  neo4j:
+    image: neo4j:5.23
+    restart: unless-stopped
+    environment:
+      - NEO4J_AUTH=${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-password}
+    ports:
+      - "7687:7687"
+      - "7474:7474"
+    volumes:
+      - neo4j_data:/data
+
+  agente-wa:
+    build: ./Agente WhatsaApp
+    restart: unless-stopped
+    env_file:
+      - ./Agente WhatsaApp/env.example
+    environment:
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-password}
+      - WA_AGENT_PORT=3005
+    ports:
+      - "3005:3005"
+    depends_on:
+      - neo4j
+
+  agente-crm:
+    build: ./Agente CRM
+    restart: unless-stopped
+    env_file:
+      - ./Agente CRM/env.example
+    environment:
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-password}
+      - CRM_AGENT_PORT=3010
+      - WA_AGENT_BASE_URL=http://agente-wa:3005
+    ports:
+      - "3010:3010"
+    depends_on:
+      - neo4j
+      - agente-wa
+
+  gateway:
+    build: ./server
+    restart: unless-stopped
+    env_file:
+      - ./server/env.example
+    environment:
+      - PORT=3000
+      - CRM_HTTP_BASE=http://agente-crm:3010
+      - WA_AGENT_BASE_URL=http://agente-wa:3005
+    ports:
+      - "3000:3000"
+    depends_on:
+      - agente-wa
+      - agente-crm
+
+volumes:
+  neo4j_data:
+
+

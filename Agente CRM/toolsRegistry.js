@@ -39,6 +39,65 @@ function isLeadNotFoundError(err) {
 
 const TOOLS = [
   {
+    id: 'crm-auto-task-executor',
+    name: 'Executar tarefas automáticas do CRM',
+    description: 'Ao receber task.created/updated com tag auto ou type whatsapp_followup, envia mensagem via WA Agent e conclui task no CRM.',
+    enabled: true,
+    eventTypes: ['crm_task_created', 'crm_task_updated'],
+    threshold: DEFAULT_THRESHOLD,
+    trigger: (ctx) => {
+      const t = ctx?.payload?.task || {}
+      const tags = Array.isArray(t.tags) ? t.tags.map(x => String(x).toLowerCase()) : []
+      const type = String(t.type || '').toLowerCase()
+      const auto = tags.includes('auto') || type === 'whatsapp_followup'
+      const hasLead = !!ctx?.leadProfile?.idWhatsapp
+      // Cooldown por taskId
+      const cooldownMs = Number(process.env.AUTO_TASK_COOLDOWN_MS || 5 * 60 * 1000)
+      const key = `autoTask::${t.id || 'unknown'}`
+      if (!global.__autoTaskLastRun) global.__autoTaskLastRun = new Map()
+      const last = global.__autoTaskLastRun.get(key) || 0
+      const fresh = Date.now() - last > cooldownMs
+      return { shouldFire: auto && hasLead && fresh, confidence: 1.0, payload: { task: t, __key: key } }
+    },
+    action: async (ctx) => {
+      const waJid = ctx?.leadProfile?.idWhatsapp
+      const task = ctx?.payload?.task || {}
+      if (!waJid) return
+      try {
+        const base = process.env.WA_AGENT_BASE_URL || 'http://localhost:3005'
+        const key = process.env.WA_AGENT_KEY || process.env.CRM_AGENT_KEY || ''
+        const url = `${String(base).replace(/\/$/, '')}/api/wa/dispatch`
+        const fetch = (await import('node-fetch')).default
+        const objective = task?.text || task?.title || 'Follow-up automático'
+        // CTA mapping por tipo
+        let cta = null
+        const ttype = String(task?.type || '').toLowerCase()
+        if (ttype === 'whatsapp_followup') cta = task?.cta || { type: 'reply_hint', label: 'Pode me responder por aqui?' }
+        if (ttype === 'proposal_reminder') cta = task?.cta || { type: 'link', label: 'Ver proposta', url: task?.proposalUrl }
+        const body = {
+          name: 'generate_and_send',
+          commandId: `task_${task?.id || Date.now()}`,
+          lead: { waJid },
+          objective,
+          constraints: { maxChars: 320 },
+          cta,
+          metadata: { reason: 'crm_task_auto', taskId: task?.id || null }
+        }
+        await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(key?{ 'X-Agent-Key': key }:{} ) }, body: JSON.stringify(body) })
+      } catch (e) { console.warn('[toolsRegistry] auto-task WA dispatch failed:', e?.message || e) }
+
+      // Concluir task no CRM
+      try {
+        const taskId = task?.id
+        if (!taskId) return
+        await dispatchToCRM('complete_task', { id: taskId })
+      } catch (e) { console.warn('[toolsRegistry] auto-task complete failed:', e?.message || e) }
+      try {
+        if (ctx?.payload?.__key) global.__autoTaskLastRun.set(ctx.payload.__key, Date.now())
+      } catch {}
+    }
+  },
+  {
     id: 'enqueue-emotion-analysis',
     name: 'Agendar análise de emoção do lead',
     description: 'Marca o lead para análise de tom/emocional em background, sem bloquear o fluxo principal.',

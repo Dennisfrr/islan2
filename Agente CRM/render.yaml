@@ -1,0 +1,66 @@
+services:
+  - type: web
+    name: crm-agent
+    env: docker
+    autoDeploy: true
+    healthCheckPath: /health
+    buildCommand: docker build -t crm-agent -f Dockerfile .
+    startCommand: npm start
+    envVars:
+      - key: PORT
+        value: 3010
+      - key: NODE_ENV
+        value: production
+      - key: NEO4J_URI
+        sync: false
+      - key: NEO4J_USER
+        sync: false
+      - key: NEO4J_PASSWORD
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: WA_AGENT_BASE_URL
+        sync: false
+      - key: WA_AGENT_KEY
+        sync: false
+      - key: CRM_BASE_URL
+        sync: false
+      - key: CRM_AGENT_KEY
+        sync: false
+      - key: CRM_BEARER_TOKEN
+        sync: false
+      - key: CRM_ORGANIZATION_ID
+        sync: false
+      - key: FOLLOWUP_SILENCE_MS
+        value: 86400000
+      - key: ROUTER_TOOL_MIN_CONF
+        value: 0.55
+      - key: PROPOSAL_BASE_URL
+        sync: false
+      - key: AUTO_TASK_COOLDOWN_MS
+        value: 300000
+      - key: CRM_WEBHOOK_SECRET
+        sync: false
+
+  - type: web
+    name: dashboard-api
+    env: docker
+    autoDeploy: true
+    healthCheckPath: /health
+    buildCommand: docker build -t dashboard-api -f Dockerfile.dashboard .
+    startCommand: node server.js
+    envVars:
+      - key: PORT
+        value: 3007
+      - key: NODE_ENV
+        value: production
+      - key: GEMINI_API_KEY_DASHBOARD
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: NEO4J_URI
+        sync: false
+      - key: NEO4J_USER
+        sync: false
+      - key: NEO4J_PASSWORD
+        sync: false

@@ -114,8 +114,8 @@ function isAgentRunning() {
 }
 
 function getAgentHttpBase() {
-  const port = Number(process.env.AGENT_HTTP_PORT || process.env.DASHBOARD_PORT || 3101)
-  return `http://127.0.0.1:${port}`
+  // Alinha com WA_AGENT_BASE para garantir que os proxies alcancem a API correta do agente
+  return String(WA_AGENT_BASE).replace(/\/$/, '')
 }
 
 app.get('/api/agent/status', async (req, res) => {

@@ -1,8 +1,9 @@
 const os = require('os');
 const { getSession } = require('./db_neo4j');
+const neo4j = require('neo4j-driver');
 
 const DEFAULT_INTERVAL_MS = Number(process.env.FOLLOWUPS_INTERVAL_MS || 60 * 1000);
-const CLAIM_LIMIT = Number(process.env.FOLLOWUPS_CLAIM_LIMIT || 10);
+const CLAIM_LIMIT = parseInt(process.env.FOLLOWUPS_CLAIM_LIMIT || '10', 10);
 const PROCESSING_STALE_MS = Number(process.env.FOLLOWUPS_PROCESSING_STALE_MS || (10 * 60 * 1000));
 const BACKOFF_BASE_MINUTES = Number(process.env.FOLLOWUPS_BACKOFF_BASE_MINUTES || 15);
 
@@ -50,7 +51,12 @@ async function claimDueFollowUps(limit) {
                 f.updatedAt = $now,
                 f.attempts = coalesce(f.attempts, 0) + 1
             RETURN f { .*, id: elementId(f) } AS f
-        `, { now, stale, limit: Number(limit || CLAIM_LIMIT), workerId });
+        `, {
+            now,
+            stale,
+            limit: neo4j.int(Math.max(0, Math.floor(Number(limit != null ? limit : CLAIM_LIMIT)))),
+            workerId
+        });
         return r.records.map(rec => rec.get('f'));
     } finally {
         await session.close();

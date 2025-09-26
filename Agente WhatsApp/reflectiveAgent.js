@@ -4,7 +4,7 @@ const goalsEngine = require('./goalsEngine');
 
 // Configurações para o LLM de reflexão
 const REFLECTION_MODEL_NAME = "gemini-1.5-flash-latest";
-const REFLECTION_MAX_OUTPUT_TOKENS = 400; // Aumentado para acomodar respostas mais detalhadas
+const REFLECTION_MAX_OUTPUT_TOKENS = 1200; // Aumentado para reduzir cortes/truncamentos do JSON
 const REFLECTION_TEMPERATURE = 0.5;
 
 // Tipos de Foco para a Reflexão
@@ -333,6 +333,20 @@ class ReflectiveAgent {
                 try {
                     let reflectionData = JSON.parse(responseText);
                     reflectionData = this._normalizeReflection(reflectionData);
+                    try {
+                        const { orchestrateStyle } = require('./styleOrchestrator');
+                        const { buildNextMessagePlan } = require('./styleTemplater');
+                        const { style, toneDirectives, policyId, complianceFlags } = orchestrateStyle(leadProfile || {}, reflectionData || {});
+                        const signals = [];
+                        if (reflectionData?.sentimentoInferidoDoLead) signals.push(reflectionData.sentimentoInferidoDoLead);
+                        if (reflectionData?.intencaoDetectada) signals.push(reflectionData.intencaoDetectada);
+                        const nextPlan = buildNextMessagePlan(style, signals);
+                        reflectionData.styleProfile = style;
+                        reflectionData.toneDirectives = toneDirectives;
+                        reflectionData.nextMessagePlan = nextPlan;
+                        reflectionData.stylePolicyId = policyId;
+                        reflectionData.styleCompliance = complianceFlags;
+                    } catch {}
                     console.log(`[ReflectiveAgent] Reflexão (Foco: ${focusType}) gerada para lead ${leadProfile.idWhatsapp}: Ação - '${reflectionData.acaoPrincipalRealizadaPeloAgente || 'N/A'}'`);
                     return reflectionData;
                 } catch (parseError) {
@@ -353,6 +367,15 @@ class ReflectiveAgent {
                         try {
                             const data = JSON.parse(balancedFromRepaired);
                             console.warn("[ReflectiveAgent] Reflexão extraída de JSON balanceado (reparado).");
+                            return this._normalizeReflection(data);
+                        } catch {}
+                    }
+                    // Tentativa 2.1: completar heurística de chaves/aspas se o JSON estiver truncado
+                    const completed = this._completeJsonHeuristically(repairedFull || responseText);
+                    if (completed) {
+                        try {
+                            const data = JSON.parse(completed);
+                            console.warn("[ReflectiveAgent] Reflexão parseada após completar chaves/aspas heurísticamente.");
                             return this._normalizeReflection(data);
                         } catch {}
                     }
@@ -445,6 +468,24 @@ ReflectiveAgent.prototype._extractBalancedJson = function (str) {
             }
         }
         return null;
+    } catch { return null; }
+}
+
+// Heurística simples para completar JSON truncado (fecha aspas e chaves)
+ReflectiveAgent.prototype._completeJsonHeuristically = function (str) {
+    try {
+        if (!str) return null;
+        let s = String(str);
+        const openBraces = (s.match(/\{/g) || []).length;
+        const closeBraces = (s.match(/\}/g) || []).length;
+        if (closeBraces < openBraces) {
+            s = s + '}'.repeat(openBraces - closeBraces);
+        }
+        const openQuotes = (s.match(/\"/g) || []).length;
+        if (openQuotes % 2 !== 0) {
+            s = s + '"';
+        }
+        return s;
     } catch { return null; }
 }
 

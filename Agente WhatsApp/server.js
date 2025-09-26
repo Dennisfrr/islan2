@@ -5,10 +5,19 @@ const dotenv = require('dotenv');
 dotenv.config();
 
 const app = express();
-const PORT = process.env.WA_AGENT_PORT || process.env.DASHBOARD_PORT || 3005;
+const PORT = process.env.PORT || process.env.WA_AGENT_PORT || process.env.DASHBOARD_PORT || 3005;
 
 app.use(cors());
 app.use(express.json());
+// Resolve organization_id from header/query/env
+app.use((req, _res, next) => {
+  const headerOrg = req.headers['x-organization-id']
+  const queryOrg = req.query && (req.query.organization_id || req.query.org)
+  const envOrg = process.env.CRM_ORGANIZATION_ID
+  const org = (headerOrg || queryOrg || envOrg || '').toString().trim()
+  req.organization_id = org || null
+  next()
+})
 
 // Optional simple key auth
 function checkKey(req, res, next) {
@@ -33,6 +42,54 @@ function getAgentExports() {
 
 app.get('/api/wa/health', (_req, res) => {
   res.json({ ok: true, service: 'wa-agent', ts: Date.now() });
+});
+
+// Generic health path for PaaS
+app.get('/health', (_req, res) => {
+  res.json({ ok: true, service: 'wa-agent', port: PORT });
+});
+
+// Expor QR atual (quando disponível) para onboarding 1-clique
+app.get('/api/wa/qr', checkKey, (_req, res) => {
+  try {
+    const { getLatestQR } = getAgentExports();
+    const v = typeof getLatestQR === 'function' ? getLatestQR() : null;
+    if (!v) return res.status(204).end();
+    res.json(v);
+  } catch (e) { res.status(500).json({ error: String(e?.message || e) }); }
+});
+
+// Status de sessão do WhatsApp (reflete statusFind)
+app.get('/api/wa/status', checkKey, (_req, res) => {
+  try {
+    const { getLatestWppStatus } = getAgentExports();
+    const v = typeof getLatestWppStatus === 'function' ? getLatestWppStatus() : { status: 'unknown' };
+    res.json(v);
+  } catch (e) { res.status(500).json({ error: String(e?.message || e) }); }
+});
+
+// Admin: configurar organização/credenciais (sem restart)
+app.post('/api/admin/enroll', checkKey, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const { setOrg, getOrg } = require('./orgConfig');
+    const updated = setOrg({
+      organization_id: body.organization_id || body.org || undefined,
+      crm_base_url: body.crm_base_url || body.crm_url || undefined,
+      crm_agent_key: body.crm_agent_key || undefined,
+      crm_bearer: body.crm_bearer || undefined
+    });
+    res.json({ ok: true, organization: updated });
+  } catch (e) {
+    res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+app.get('/api/admin/info', checkKey, (_req, res) => {
+  try {
+    const { getOrg } = require('./orgConfig');
+    res.json({ ok: true, organization: getOrg() });
+  } catch (e) { res.status(500).json({ error: String(e?.message || e) }); }
 });
 
 app.get('/api/wa/session/status', (_req, res) => {
@@ -72,6 +129,21 @@ app.post('/api/wa/dispatch', checkKey, async (req, res) => {
     return res.json({ status: 'SENT', variant: abTest ? 'B' : 'A', metadata: metadata || null });
   } catch (e) {
     console.error('[wa/dispatch] error:', e?.message || e);
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+// Pre-meeting briefing endpoint
+app.get('/api/wa/premeeting/brief', checkKey, async (req, res) => {
+  try {
+    const leadId = String(req.query.leadId || '').trim();
+    if (!leadId) return res.status(400).json({ error: 'leadId_required' });
+    const { generatePreMeetingBrief } = getAgentExports();
+    if (typeof generatePreMeetingBrief !== 'function') return res.status(503).json({ error: 'brief_helper_unavailable' });
+    const data = await generatePreMeetingBrief(leadId);
+    return res.json({ ok: true, brief: data });
+  } catch (e) {
+    console.error('[wa/premeeting/brief] error:', e?.message || e);
     return res.status(500).json({ error: String(e?.message || e) });
   }
 });

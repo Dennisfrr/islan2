@@ -14,6 +14,8 @@ const { ReflectiveAgent, ReflectionFocus } = require('./reflectiveAgent');
 const { ReflectionAnalyticsTracker } = require('./reflectionAnalyticsTracker'); // Importa o Tracker
 const { MetaReflexor } = require('./metaReflexor'); // Importa o MetaReflexor
 const fetch = require('node-fetch');
+const { orchestrateStyle } = require('./styleOrchestrator');
+const { buildNextMessagePlan } = require('./styleTemplater');
 
 // --- Configurações Globais ---
 const SESSION_NAME = process.env.SESSION_NAME || 'wpp-consultor-neo4j';
@@ -666,6 +668,18 @@ const generationConfig = {
 const chatSessions = {};
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+// --- ESTADO PÚBLICO PARA QR E STATUS ---
+let latestQrBase64 = null;
+let latestQrAt = 0;
+let latestSessionStatus = { status: 'unknown', session: null, connected: false };
+
+function getLatestQR() {
+    return latestQrBase64 ? { qr: latestQrBase64, at: latestQrAt, session: latestSessionStatus.session } : null;
+}
+function getLatestWppStatus() {
+    return latestSessionStatus;
+}
+
 // --- FUNÇÕES DE INTERAÇÃO COM NEO4J PARA PERFIL ---
 async function carregarOuCriarPerfilLead(userId, userName) {
     const neo4jSession = await getSession();
@@ -686,7 +700,7 @@ async function carregarOuCriarPerfilLead(userId, userName) {
     };
     try {
         const result = await neo4jSession.run(
-            `MERGE (l:Lead {idWhatsapp: $userId})
+            `MERGE (l:Lead {idWhatsapp: $userId, organization_id: $org})
              ON CREATE SET 
                 l.nome = $userName, 
                 l.dtCriacao = timestamp(), 
@@ -703,7 +717,7 @@ async function carregarOuCriarPerfilLead(userId, userName) {
                     l.emotionalState AS emotionalState, l.emotionalConfidence AS emotionalConfidence,
                     l.decisionProfile AS decisionProfile, l.decisionProfileSecondary AS decisionProfileSecondary,
                     l.precallSummary AS precallSummary, l.precallQuestions AS precallQuestions`,
-            { userId, userName }
+            { userId, userName, org: (process.env.CRM_ORGANIZATION_ID || process.env.ORGANIZATION_ID || null) }
         );
         if (result.records.length > 0) {
             const record = result.records[0];
@@ -721,15 +735,15 @@ async function carregarOuCriarPerfilLead(userId, userName) {
             perfil.precallSummary = record.get('precallSummary') || null;
             perfil.precallQuestions = record.get('precallQuestions') || [];
 
-            const doresResult = await neo4jSession.run('MATCH (l:Lead {idWhatsapp: $userId})-[:TEM_DOR]->(d:Dor) RETURN d.nome AS nomeDor', { userId });
+            const doresResult = await neo4jSession.run('MATCH (l:Lead {idWhatsapp: $userId, organization_id: $org})-[:TEM_DOR]->(d:Dor {organization_id: $org}) RETURN d.nome AS nomeDor', { userId, org: (process.env.CRM_ORGANIZATION_ID || process.env.ORGANIZATION_ID || null) });
             perfil.principaisDores = doresResult.records.map(r => r.get('nomeDor'));
-            const interessesResult = await neo4jSession.run('MATCH (l:Lead {idWhatsapp: $userId})-[:TEM_INTERESSE]->(i:Interesse) RETURN i.nome AS nomeInteresse', { userId });
+            const interessesResult = await neo4jSession.run('MATCH (l:Lead {idWhatsapp: $userId, organization_id: $org})-[:TEM_INTERESSE]->(i:Interesse {organization_id: $org}) RETURN i.nome AS nomeInteresse', { userId, org: (process.env.CRM_ORGANIZATION_ID || process.env.ORGANIZATION_ID || null) });
             perfil.interessesEspecificos = interessesResult.records.map(r => r.get('nomeInteresse'));
-            const solucoesResult = await neo4jSession.run('MATCH (l:Lead {idWhatsapp: $userId})-[:DISCUTIU_SOLUCAO]->(s:Solucao) RETURN s.nome AS nomeSolucao', { userId });
+            const solucoesResult = await neo4jSession.run('MATCH (l:Lead {idWhatsapp: $userId, organization_id: $org})-[:DISCUTIU_SOLUCAO]->(s:Solucao {organization_id: $org}) RETURN s.nome AS nomeSolucao', { userId, org: (process.env.CRM_ORGANIZATION_ID || process.env.ORGANIZATION_ID || null) });
             perfil.solucoesJaDiscutidas = solucoesResult.records.map(r => r.get('nomeSolucao'));
-            const notasResult = await neo4jSession.run('MATCH (l:Lead {idWhatsapp: $userId}) RETURN l.notasAdicionais AS notas', { userId });
+            const notasResult = await neo4jSession.run('MATCH (l:Lead {idWhatsapp: $userId, organization_id: $org}) RETURN l.notasAdicionais AS notas', { userId, org: (process.env.CRM_ORGANIZATION_ID || process.env.ORGANIZATION_ID || null) });
             if (notasResult.records.length > 0 && notasResult.records[0].get('notas')) perfil.notasAdicionais = notasResult.records[0].get('notas');
-            const histResult = await neo4jSession.run('MATCH (l:Lead {idWhatsapp: $userId}) RETURN l.historicoDeInteracaoResumido AS historico', { userId });
+            const histResult = await neo4jSession.run('MATCH (l:Lead {idWhatsapp: $userId, organization_id: $org}) RETURN l.historicoDeInteracaoResumido AS historico', { userId, org: (process.env.CRM_ORGANIZATION_ID || process.env.ORGANIZATION_ID || null) });
             if (histResult.records.length > 0 && histResult.records[0].get('historico')) perfil.historicoDeInteracaoResumido = histResult.records[0].get('historico');
             
             console.log(`[Neo4j Perfil] Perfil para ${userName} (ID: ${userId}). Tipo Neg: ${perfil.tipoDeNegocio}. Tags: ${perfil.tags.join(', ')}. Hipóteses: ${perfil.activeHypotheses.length}`);
@@ -745,18 +759,18 @@ async function carregarOuCriarPerfilLead(userId, userName) {
 async function salvarOuAtualizarArrayDeNosRelacionados(neo4jSession, userId, leadPropertyArray, nodeLabel, relationshipType) {
     // Remove relações existentes para este tipo
     await neo4jSession.run(
-        `MATCH (l:Lead {idWhatsapp: $userId})-[r:${relationshipType}]->(n:${nodeLabel}) DELETE r`,
-        { userId }
+        `MATCH (l:Lead {idWhatsapp: $userId, organization_id: $org})-[r:${relationshipType}]->(n:${nodeLabel} {organization_id: $org}) DELETE r`,
+        { userId, org: (process.env.CRM_ORGANIZATION_ID || process.env.ORGANIZATION_ID || null) }
     );
     // Cria novas relações se houver itens no array
     if (leadPropertyArray && leadPropertyArray.length > 0) {
         for (const itemName of leadPropertyArray) {
             if (itemName && String(itemName).trim() !== "") { // Garante que não é nulo ou string vazia
                 await neo4jSession.run(
-                    `MATCH (l:Lead {idWhatsapp: $userId})
-                     MERGE (n:${nodeLabel} {name: $itemName})
+                    `MATCH (l:Lead {idWhatsapp: $userId, organization_id: $org})
+                     MERGE (n:${nodeLabel} {name: $itemName, organization_id: $org})
                      MERGE (l)-[:${relationshipType}]->(n)`,
-                    { userId, itemName: String(itemName).trim() }
+                    { userId, itemName: String(itemName).trim(), org: (process.env.CRM_ORGANIZATION_ID || process.env.ORGANIZATION_ID || null) }
                 );
             }
         }
@@ -767,7 +781,7 @@ async function salvarPerfilLead(userId, perfil) {
     const neo4jSession = await getSession();
     try {
         await neo4jSession.run(
-            `MATCH (l:Lead {idWhatsapp: $userId})
+            `MATCH (l:Lead {idWhatsapp: $userId, organization_id: $org})
              SET l.nome = $nomeDoLead, l.nomeDoNegocio = $nomeDoNegocio, l.tipoDeNegocio = $tipoDeNegocio,
                  l.nivelDeInteresseReuniao = $nivelDeInteresseReuniao, l.ultimoResumoDaSituacao = $ultimoResumoDaSituacao,
                  l.notasAdicionais = $notasAdicionais, l.historicoDeInteracaoResumido = $historicoDeInteracaoResumido,
@@ -776,6 +790,7 @@ async function salvarPerfilLead(userId, perfil) {
                  l.dtUltimaAtualizacao = timestamp()`,
             {
                 userId,
+                org: (process.env.CRM_ORGANIZATION_ID || process.env.ORGANIZATION_ID || null),
                 nomeDoLead: perfil.nomeDoLead,
                 nomeDoNegocio: perfil.nomeDoNegocio,
                 tipoDeNegocio: perfil.tipoDeNegocio,
@@ -1040,6 +1055,30 @@ Hipóteses Ativas: ${sessionData.activeHypotheses.map(h => `${h.description} (Co
             userMessageContentParts.unshift({ text: `<modulacao_de_tom>\n${combinedHints.map((h,i)=>`${i+1}. ${h}`).join('\n')}\n</modulacao_de_tom>\n\n` });
         }
     } catch {}
+
+    // Orquestração de estilo em tempo real (usa última reflexão disponível)
+    try {
+        const lastReflection = (sessionData.reflectionHistory || []).slice(-1)[0] || null;
+        const { style, toneDirectives, policyId, complianceFlags } = orchestrateStyle(currentPerfilDoLead || {}, lastReflection || {});
+        const signals = [];
+        if (lastReflection?.sentimentoInferidoDoLead) signals.push(lastReflection.sentimentoInferidoDoLead);
+        if (lastReflection?.intencaoDetectada) signals.push(lastReflection.intencaoDetectada);
+        const nextPlan = buildNextMessagePlan(style, signals);
+        const styleBlock = `<style_profile_aplicado policy="${policyId}">
+tom=${style.tom}; comprimento=${style.comprimento}; diretividade=${style.diretividade}; empatia=${style.empatia}; evidencias=${style.evidencias}; exemplos=${style.exemplos||style.historias||false}; cta_pressure=${style.cta_pressure}; emojis_on=${style.emojis_on}
+diretivas:
+${toneDirectives.map((t,i)=>`${i+1}. ${t}`).join('\n')}
+guardrails: forbid_promises=${complianceFlags.forbid_promises===true}
+micro_templates:
+  opening: ${nextPlan.opening || ''}
+  body: ${nextPlan.body || ''}
+  cta: ${nextPlan.cta || ''}
+</style_profile_aplicado>
+
+`;
+        userMessageContentParts.unshift({ text: styleBlock });
+        console.log(`[Style] Applied ${policyId} for ${userId}:`, JSON.stringify({ style, toneDirectives, nextPlan }));
+    } catch (e) { console.warn('[Style] orchestrate error:', e?.message || e); }
     
     let combinedUserTextForLLM = "";
     let lastAudioMessageForLLM = null;
@@ -1274,12 +1313,12 @@ async function processAndRespondToMessages(client, senderId, senderName, message
                       try {
                         const at = Date.now();
                         await neo4jSession.run(`
-                          MERGE (l:Lead {idWhatsapp: $id})
+                          MERGE (l:Lead {idWhatsapp: $id, organization_id: $org})
                           ON CREATE SET l.nome = $name, l.dtCriacao = timestamp()
                           WITH l
-                          CREATE (m:Message { id: $mid, text: $text, at: $at, role: 'model', direction: 'outbound' })
+                          CREATE (m:Message { id: $mid, text: $text, at: $at, role: 'model', direction: 'outbound', organization_id: $org })
                           CREATE (l)-[:HAS_MESSAGE]->(m)
-                        `, { id: senderId, name: senderName, mid: `${senderId}-${at}-${i}`, text: part, at: neo4j.int(at) });
+                        `, { id: senderId, org: (process.env.CRM_ORGANIZATION_ID || process.env.ORGANIZATION_ID || null), name: senderName, mid: `${senderId}-${at}-${i}`, text: part, at: neo4j.int(at) });
                       } finally { await neo4jSession.close(); }
                     } catch (persistErr) { console.warn('[Persist Outbound] falhou:', persistErr?.message || persistErr); }
                 } catch (sendError) {
@@ -1523,12 +1562,16 @@ async function processAndRespondToMessages(client, senderId, senderName, message
                           insight
                         };
                         try {
-                          const resp = await fetch(`${String(baseDash).replace(/\/$/,'')}/api/followups/insights`, {
-                            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
-                          });
+                          const configuredUrl = process.env.FOLLOWUPS_INSIGHTS_URL ? String(process.env.FOLLOWUPS_INSIGHTS_URL) : '';
+                          const targetUrl = configuredUrl.trim() ? configuredUrl : `${String(baseDash).replace(/\/$/,'')}/api/followups/insights`;
+                          const resp = await fetch(targetUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
                           if (!resp.ok) {
                             const t = await resp.text().catch(()=> '');
-                            console.warn('[Insights] persist failed:', resp.status, t);
+                            if (resp.status === 404) {
+                              console.info('[Insights] endpoint indisponível (404). Ignorando persistência de insights.');
+                            } else {
+                              console.warn('[Insights] persist failed:', resp.status, t);
+                            }
                           }
                         } catch (e) { console.warn('[Insights] post error:', e?.message || e); }
                       } catch (e) {
@@ -1661,8 +1704,14 @@ async function startBot() {
 
     const client = await wppconnect.create({
       session: SESSION_NAME,
-      catchQR: (base64Qr, asciiQR) => { console.log('QR Code:\n' + asciiQR); },
+      catchQR: (base64Qr, asciiQR) => {
+        latestQrBase64 = base64Qr;
+        latestQrAt = Date.now();
+        console.log('QR Code:\n' + asciiQR);
+      },
       statusFind: (statusSession, session) => {
+        latestSessionStatus = { status: statusSession, session, connected: statusSession === 'isLogged' };
+        if (statusSession === 'isLogged') { latestQrBase64 = null; }
         console.log('[WPPConnect] Status da Sessão:', statusSession, '- Nome:', session);
         if (statusSession === 'isLogged') console.log('[WPPConnect] Cliente conectado! ✅');
       },
@@ -1867,12 +1916,12 @@ async function startBot() {
           const text = message.body || '';
           if (text && !message.fromMe && !message.isStatusMsg && !message.isGroupMsg) {
             await neo4jSession.run(`
-              MERGE (l:Lead {idWhatsapp: $id})
+              MERGE (l:Lead {idWhatsapp: $id, organization_id: $org})
               ON CREATE SET l.nome = $name, l.dtCriacao = timestamp()
               WITH l
-              CREATE (m:Message { id: $mid, text: $text, at: $at, role: 'user', direction: 'inbound' })
+              CREATE (m:Message { id: $mid, text: $text, at: $at, role: 'user', direction: 'inbound', organization_id: $org })
               CREATE (l)-[:HAS_MESSAGE]->(m)
-            `, { id: senderId, name: senderName, mid: String(message.id || `${senderId}-${at}`), text, at: neo4j.int(at) });
+            `, { id: senderId, org: (process.env.CRM_ORGANIZATION_ID || process.env.ORGANIZATION_ID || null), name: senderName, mid: String(message.id || `${senderId}-${at}`), text, at: neo4j.int(at) });
           }
         } finally { await neo4jSession.close(); }
       } catch (e) { console.warn('[Persist Inbound] falhou:', e?.message || e); }
@@ -2079,7 +2128,7 @@ process.on('unhandledRejection', (reason, promise) => {
   // Considerar um gracefulShutdown
 });
 
-module.exports = { popularEsquemasIniciais, popularSocialProofData };
+module.exports = { popularEsquemasIniciais, popularSocialProofData, sendWhatsAppText, generatePreMeetingBrief, getLatestQR, getLatestWppStatus };
 
 // === UTIL: Remove marcadores internos (PENSAMENTO, AÇÃO, OBSERVAÇÃO) da resposta ===
 function sanitizeModelOutputForUser(rawText) {
@@ -2107,15 +2156,80 @@ async function sendWhatsAppText(waJid, text, options = {}) {
         try {
             const at = Date.now();
             await s.run(`
-              MERGE (l:Lead {idWhatsapp: $id})
+              MERGE (l:Lead {idWhatsapp: $id, organization_id: $org})
               ON CREATE SET l.nome = $name, l.dtCriacao = timestamp()
               WITH l
-              CREATE (m:Message { id: $mid, text: $text, at: $at, role: 'model', direction: 'outbound' })
+              CREATE (m:Message { id: $mid, text: $text, at: $at, role: 'model', direction: 'outbound', organization_id: $org })
               CREATE (l)-[:HAS_MESSAGE]->(m)
               SET l.lastOutboundAt = $at, l.dtUltimaAtualizacao = timestamp()
-            `, { id: leadId, name: leadName, mid: `${leadId}-${at}`, text: String(text||''), at: neo4j.int(at) });
+            `, { id: leadId, org: (process.env.CRM_ORGANIZATION_ID || process.env.ORGANIZATION_ID || null), name: leadName, mid: `${leadId}-${at}`, text: String(text||''), at: neo4j.int(at) });
         } finally { await s.close(); }
     } catch {}
     return { ok: true };
+}
+
+// === Briefing Pré-Reunião: consolida contexto para o vendedor ===
+async function generatePreMeetingBrief(leadId) {
+    const id = String(leadId || '').trim();
+    if (!id) throw new Error('leadId_required');
+    const { getSession } = require('./db_neo4j');
+    const s = await getSession();
+    try {
+        const r = await s.run(`
+          MATCH (l:Lead { idWhatsapp: $id })
+          OPTIONAL MATCH (l)-[:HAS_MESSAGE]->(m:Message)
+          WITH l, m ORDER BY m.at DESC
+          WITH l,
+               collect({role: m.role, text: m.text, at: m.at})[0..6] AS lastMsgs
+          OPTIONAL MATCH (l)-[:TEM_DOR]->(d:Dor)
+          WITH l, lastMsgs, collect(DISTINCT d.nome)[0..5] AS dores
+          OPTIONAL MATCH (l)-[:TEM_INTERESSE]->(i:Interesse)
+          WITH l, lastMsgs, dores, collect(DISTINCT i.nome)[0..5] AS interesses
+          RETURN l { .*, dores: dores, interesses: interesses } AS lead, lastMsgs
+        `, { id });
+        const lead = r.records[0]?.get('lead') || {};
+        const lastMsgs = r.records[0]?.get('lastMsgs') || [];
+
+        const nome = lead.nome || lead.nomeDoLead || '';
+        const segment = lead.tipoDeNegocio || 'N/A';
+        const dores = Array.isArray(lead.dores) ? lead.dores : (lead.principaisDores || []);
+        const interesses = Array.isArray(lead.interesses) ? lead.interesses : (lead.interessesEspecificos || []);
+        const resumo = lead.ultimoResumoDaSituacao || null;
+        const sentimento = lead.sentimentoInferido || lead.estadoEmocional || null;
+
+        // Objeções prováveis simples a partir de dores/interesses
+        const provaveisObjecoes = [];
+        if ((dores||[]).some(d => /pre[cç]o|custo/i.test(d))) provaveisObjecoes.push('Preço/Retorno');
+        if ((dores||[]).some(d => /tempo|prazo/i.test(d))) provaveisObjecoes.push('Tempo/Prazo');
+        if ((dores||[]).some(d => /complex|integra/i.test(d))) provaveisObjecoes.push('Complexidade/Integração');
+
+        // Últimas falas
+        const ultimaDoLead = (lastMsgs.find(x => x.role === 'user') || {}).text || null;
+        const ultimaDoAgente = (lastMsgs.find(x => x.role === 'model') || {}).text || null;
+
+        return {
+            leadId: id,
+            nome,
+            segmento: segment,
+            resumo,
+            sentimento,
+            dores: (dores || []).slice(0,5),
+            interesses: (interesses || []).slice(0,5),
+            ultimasMensagens: lastMsgs,
+            sugestoesDeAbertura: [
+              'Confirmar objetivo da conversa e expectativa da call',
+              'Retomar dor principal e impacto (curto)'
+            ],
+            pontosAAbordar: [
+              'Impacto e urgência',
+              'Caminho proposto (alto nível) com próximo passo',
+              'Evidência breve relevante ao segmento'
+            ],
+            objeçõesProvaveis: provaveisObjecoes,
+            proximoPassoSugerido: 'Alinhar 1 resultado concreto esperado e confirmar próximos passos (ex.: proposta/POC).',
+            ultimaFalaLead: ultimaDoLead,
+            ultimaFalaAgente: ultimaDoAgente
+        };
+    } finally { await s.close(); }
 }
 

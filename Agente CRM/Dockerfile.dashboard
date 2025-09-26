@@ -1,0 +1,18 @@
+# Dashboard API Dockerfile
+FROM node:20-bookworm
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm ci --omit=dev
+
+COPY . .
+
+ENV NODE_ENV=production
+# Render/Heroku style dynamic port; default 3007
+ENV PORT=3007
+EXPOSE 3007
+
+CMD ["sh", "-c", "node server.js"]
+
+

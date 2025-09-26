@@ -1,9 +1,5 @@
 require('dotenv').config()
-
-const CRM_BASE_URL = process.env.CRM_BASE_URL || process.env.CRM_URL || 'http://localhost:3000'
-const CRM_AGENT_KEY = process.env.CRM_AGENT_KEY || process.env.AGENT_API_KEY || ''
-const CRM_BEARER_TOKEN = process.env.CRM_BEARER_TOKEN || process.env.CRM_SERVICE_TOKEN || ''
-const CRM_ORGANIZATION_ID = process.env.CRM_ORGANIZATION_ID || ''
+const { getOrg } = require('./orgConfig')
 
 if (!CRM_AGENT_KEY && !CRM_BEARER_TOKEN) {
   console.warn('[CRMBridge] AVISO: defina CRM_AGENT_KEY (ou AGENT_API_KEY) ou CRM_BEARER_TOKEN no .env para autenticar no CRM /api/agent/dispatch')
@@ -30,17 +26,22 @@ function markProcessed(id) {
   }
 }
 
-async function dispatchToCRM(name, payload, { idempotencyKey, timeoutMs = 10000 } = {}) {
-  const url = `${String(CRM_BASE_URL).replace(/\/$/, '')}/api/agent/dispatch`
+async function dispatchToCRM(name, payload, { idempotencyKey, timeoutMs = 20000 } = {}) {
+  const org = getOrg()
+  const base = org.crm_base_url || process.env.CRM_BASE_URL || process.env.CRM_URL || 'http://localhost:3000'
+  const key = org.crm_agent_key || process.env.CRM_AGENT_KEY || process.env.AGENT_API_KEY || ''
+  const bearer = org.crm_bearer || process.env.CRM_BEARER_TOKEN || process.env.CRM_SERVICE_TOKEN || ''
+  const orgId = org.organization_id || process.env.CRM_ORGANIZATION_ID || ''
+  const url = `${String(base).replace(/\/$/, '')}/api/agent/dispatch`
   const headers = { 'Content-Type': 'application/json' }
-  if (CRM_AGENT_KEY) headers['X-Agent-Key'] = CRM_AGENT_KEY
-  if (CRM_BEARER_TOKEN) headers['Authorization'] = `Bearer ${CRM_BEARER_TOKEN}`
+  if (key) headers['X-Agent-Key'] = key
+  if (bearer) headers['Authorization'] = `Bearer ${bearer}`
   if (idempotencyKey) headers['Idempotency-Key'] = String(idempotencyKey)
 
   // Injeta organization_id por padrão se ausente
   const enrichedPayload = {
     ...(payload || {}),
-    ...(CRM_ORGANIZATION_ID && !payload?.organization_id ? { organization_id: CRM_ORGANIZATION_ID } : {}),
+    ...(orgId && !payload?.organization_id ? { organization_id: orgId } : {}),
   }
 
   const controller = new AbortController()
@@ -61,6 +62,6 @@ async function dispatchToCRM(name, payload, { idempotencyKey, timeoutMs = 10000 
   }
 }
 
-module.exports = { dispatchToCRM, wasProcessed, markProcessed, CRM_ORGANIZATION_ID }
+module.exports = { dispatchToCRM, wasProcessed, markProcessed, CRM_ORGANIZATION_ID: orgId }
 
 

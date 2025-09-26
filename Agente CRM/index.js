@@ -10,8 +10,17 @@ const { ReflectiveAgent, ReflectionFocus } = require('./reflectiveAgent')
 const app = express()
 app.use(cors())
 app.use(express.json())
+// Resolve organization_id from header/query/env
+app.use((req, _res, next) => {
+  const headerOrg = req.headers['x-organization-id']
+  const queryOrg = req.query && (req.query.organization_id || req.query.org)
+  const envOrg = process.env.CRM_ORGANIZATION_ID
+  const org = (headerOrg || queryOrg || envOrg || '').toString().trim()
+  req.organization_id = org || null
+  next()
+})
 
-const PORT = Number(process.env.CRM_AGENT_PORT || 3010)
+const PORT = Number(process.env.PORT || process.env.CRM_AGENT_PORT || 3010)
 const CRM_WEBHOOK_SECRET = process.env.CRM_WEBHOOK_SECRET || ''
 
 app.get('/health', (_req, res) => res.json({ ok: true, service: 'crm-agent', port: PORT }))
@@ -47,7 +56,7 @@ app.post('/api/crm/webhook', async (req, res) => {
     const { type, data } = body
     if (!type) return res.status(400).json({ error: 'type_required' })
 
-    // Mapeamentos comuns: lead.created, lead.updated, lead.stage_changed, note.created, task.completed
+  // Mapeamentos comuns: lead.created, lead.updated, lead.stage_changed, task.created/updated
     switch (String(type)) {
       case 'lead.created': {
         const leadProfile = normalizeLeadFromCrm(data)
@@ -64,6 +73,16 @@ app.post('/api/crm/webhook', async (req, res) => {
         await evaluateAndRunTools({ eventType: 'crm_stage_changed', leadProfile, payload: { raw: data, toStage: data?.toStage } })
         break
       }
+    case 'task.created': {
+      const leadProfile = normalizeLeadFromCrm(data?.lead || data)
+      await evaluateAndRunTools({ eventType: 'crm_task_created', leadProfile, payload: { raw: data, task: data } })
+      break
+    }
+    case 'task.updated': {
+      const leadProfile = normalizeLeadFromCrm(data?.lead || data)
+      await evaluateAndRunTools({ eventType: 'crm_task_updated', leadProfile, payload: { raw: data, task: data } })
+      break
+    }
       default: {
         await evaluateAndRunTools({ eventType: `crm_${String(type)}`, leadProfile: normalizeLeadFromCrm(data), payload: { raw: data } })
       }

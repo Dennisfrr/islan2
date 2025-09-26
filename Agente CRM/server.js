@@ -2,7 +2,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { getSession, closeDriver, neo4jDriver } = require('./db_neo4j'); // Assumindo que db_neo4j exporta o driver também
+const { getSession, closeDriver } = require('./db_neo4j');
 const neo4j = require('neo4j-driver');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
@@ -14,10 +14,22 @@ const genAIDashboard = GEMINI_API_KEY_DASHBOARD ? new GoogleGenerativeAI(GEMINI_
 const insightModel = genAIDashboard ? genAIDashboard.getGenerativeModel({ model: "gemini-1.5-flash-latest" }) : null;
 
 const app = express();
-const PORT = process.env.DASHBOARD_PORT || 3007;
+const PORT = process.env.PORT || process.env.DASHBOARD_PORT || 3007;
 
 app.use(cors());
 app.use(express.json());
+// Resolve organization_id
+app.use((req, _res, next) => {
+    const headerOrg = req.headers['x-organization-id'];
+    const queryOrg = req.query && (req.query.organization_id || req.query.org);
+    const envOrg = process.env.CRM_ORGANIZATION_ID;
+    req.organization_id = String(headerOrg || queryOrg || envOrg || '').trim() || null;
+    next();
+});
+// Healthcheck
+app.get('/health', (_req, res) => {
+    res.json({ ok: true, service: 'dashboard-api', port: PORT });
+});
 // ===== Goals API ===== (safe require)
 let goalsEngine = null;
 try {
@@ -297,7 +309,7 @@ app.get('/api/agent/planner/plans', async (req, res) => {
     try {
         // Simular os planos como definidos no seu planner.js
         // Em um sistema real, isso poderia vir de uma configuração ou ser introspectado.
-        const plansFromAgent = require('../kora-agent-files/planner').PLANS; // Assumindo que você pode requerer o PLANS diretamente
+        const plansFromAgent = require('./planner').PLANS;
         const formattedPlans = Object.entries(plansFromAgent).map(([id, planData], index) => ({
             id: `plan${index + 1}`, // Gerar um ID simples para o frontend
             name: id,
@@ -321,10 +333,11 @@ app.get('/api/agent/planner/plans', async (req, res) => {
 // 4. Leads (Aprimorado)
 app.get('/api/leads/:id', async (req, res) => {
     const { id: leadWhatsappId } = req.params;
+    const org = req.organization_id;
     const neo4jSession = await getSession();
     try {
         const result = await neo4jSession.run(`
-            MATCH (l:Lead {idWhatsapp: $leadWhatsappId})
+            MATCH (l:Lead {idWhatsapp: $leadWhatsappId, organization_id: $org})
             OPTIONAL MATCH (l)-[:TEM_DOR]->(d:Dor)
             OPTIONAL MATCH (l)-[:TEM_INTERESSE]->(i:Interesse)
             OPTIONAL MATCH (l)-[:DISCUTIU_SOLUCAO]->(s:Solucao)
@@ -356,7 +369,7 @@ app.get('/api/leads/:id', async (req, res) => {
                 emotionalUpdatedAt: l.emotionalUpdatedAt,
                 emotionalJustification: l.emotionalJustification
             } AS lead
-        `, { leadWhatsappId });
+        `, { leadWhatsappId, org });
 
         if (result.records.length === 0) {
             return res.status(404).json({ error: "Lead não encontrado" });
@@ -401,14 +414,15 @@ app.post('/api/leads/:id/analyze', async (req, res) => {
         if (!insightModel) return res.status(500).json({ error: 'gemini_not_configured' });
         const waId = String(req.params.id || '');
         if (!waId) return res.status(400).json({ error: 'id_required' });
+        const org = req.organization_id;
         const neo4jSession = await getSession();
         try {
             const result = await neo4jSession.run(`
-                MATCH (l:Lead {idWhatsapp: $waId})
+                MATCH (l:Lead {idWhatsapp: $waId, organization_id: $org})
                 OPTIONAL MATCH (l)-[:TEM_DOR]->(d:Dor)
                 OPTIONAL MATCH (l)-[:TEM_INTERESSE]->(i:Interesse)
                 RETURN l { .* } AS lead, collect(DISTINCT d.nome) AS dores, collect(DISTINCT i.nome) AS interesses
-            `, { waId });
+            `, { waId, org });
             if (result.records.length === 0) return res.status(404).json({ error: 'lead_not_found' });
             const lead = result.records[0].get('lead');
             const dores = result.records[0].get('dores') || [];
@@ -429,9 +443,9 @@ Perfil: ${JSON.stringify(profile)}`;
             let resumo = null, proximoPasso = null;
             try { const js = JSON.parse(text); resumo = js?.resumo || null; proximoPasso = js?.proximoPasso || null; } catch { resumo = text.slice(0, 600); }
             await neo4jSession.run(`
-                MATCH (l:Lead {idWhatsapp: $waId})
+                MATCH (l:Lead {idWhatsapp: $waId, organization_id: $org})
                 SET l.ultimoResumoDaSituacao = coalesce($resumo, l.ultimoResumoDaSituacao), l.dtUltimaAtualizacao = timestamp()
-            `, { waId, resumo });
+            `, { waId, resumo, org });
             // Inferência de tom/emocional do lead
             let emotionalState = null; let emotionalConfidence = null; let emotionJustification = null;
             try {
@@ -449,12 +463,12 @@ Perfil: ${JSON.stringify(profile)}`;
             } catch {}
             if (emotionalState) {
                 await neo4jSession.run(`
-                    MATCH (l:Lead {idWhatsapp: $waId})
+                    MATCH (l:Lead {idWhatsapp: $waId, organization_id: $org})
                     SET l.emotionalState = $emotionalState,
                         l.emotionalConfidence = $emotionalConfidence,
                         l.emotionalUpdatedAt = timestamp(),
                         l.emotionalJustification = coalesce($emotionJustification, l.emotionalJustification)
-                `, { waId, emotionalState, emotionalConfidence, emotionJustification });
+                `, { waId, emotionalState, emotionalConfidence, emotionJustification, org });
             }
             return res.json({ ok: true, resumo, proximoPasso, emotionalState: emotionalState || null, emotionalConfidence: emotionalConfidence ?? null });
         } finally { await neo4jSession.close(); }
@@ -468,12 +482,13 @@ Perfil: ${JSON.stringify(profile)}`;
 app.get('/api/leads/:id/emotion', async (req, res) => {
   const waId = String(req.params.id || '')
   if (!waId) return res.status(400).json({ error: 'id_required' })
+  const org = req.organization_id
   const neo4jSession = await getSession()
   try {
     const r = await neo4jSession.run(`
-      MATCH (l:Lead {idWhatsapp: $waId})
+      MATCH (l:Lead {idWhatsapp: $waId, organization_id: $org})
       RETURN l.emotionalState AS state, l.emotionalConfidence AS confidence, l.emotionalUpdatedAt AS updatedAt, l.emotionalJustification AS justification
-    `, { waId })
+    `, { waId, org })
     if (!r.records.length) return res.status(404).json({ error: 'lead_not_found' })
     const rec = r.records[0]
     return res.json({
@@ -508,13 +523,14 @@ app.post('/api/leads/:id/emotion/refresh', async (req, res) => {
 app.get('/api/leads/:id/chathistory', async (req, res) => {
     const id = String(req.params.id || '');
     if (!id) return res.status(400).json({ error: 'id_required' });
+    const org = req.organization_id;
     const session = await getSession();
     try {
         const r = await session.run(`
-          MATCH (l:Lead { idWhatsapp: $id })-[:HAS_MESSAGE]->(m:Message)
+          MATCH (l:Lead { idWhatsapp: $id, organization_id: $org })-[:HAS_MESSAGE]->(m:Message)
           RETURN m.role AS role, m.text AS text, m.at AS at
           ORDER BY m.at ASC
-        `, { id });
+        `, { id, org });
         const items = r.records.map(rec => ({
             role: rec.get('role'),
             parts: [{ text: rec.get('text') || '' }],
@@ -720,6 +736,7 @@ app.get('/api/knowledgebase/items/:nodeType', async (req, res) => {
 app.post('/api/followups', async (req, res) => {
     const neo4jSession = await getSession();
     try {
+        const org = req.organization_id;
         const body = req.body || {};
         const leadId = body.leadId;
         const objective = body.objective || 'Retomar conversa';
@@ -735,10 +752,11 @@ app.post('/api/followups', async (req, res) => {
         const scheduledAt = scheduleMinutes > 0 ? now + (scheduleMinutes * 60 * 1000) : now + (15 * 60 * 1000);
 
         const result = await neo4jSession.run(`
-            MATCH (l:Lead { idWhatsapp: $id })
+            MATCH (l:Lead { idWhatsapp: $id, organization_id: $org })
             CREATE (f:FollowUp {
               objective: $objective,
               leadId: $id,
+              organization_id: $org,
               channel: 'whatsapp',
               status: 'scheduled',
               scheduledAt: $scheduledAt,
@@ -754,6 +772,7 @@ app.post('/api/followups', async (req, res) => {
             RETURN f { .*, id: elementId(f) } AS followup
         `, {
             id: leadId,
+            org,
             objective,
             scheduledAt: neo4j.int(scheduledAt),
             now: neo4j.int(now),
@@ -796,18 +815,19 @@ app.get('/api/analytics/followups', async (_req, res) => {
 app.get('/api/followups/candidates', async (req, res) => {
     const session = await getSession();
     try {
+        const org = req.organization_id;
         const silenceMs = Number(process.env.FOLLOWUP_SILENCE_MS || (24 * 60 * 60 * 1000));
         const now = Date.now();
 
         // Busca último inbound/outbound por lead a partir de mensagens
         const r = await session.run(`
-          MATCH (l:Lead)
+          MATCH (l:Lead { organization_id: $org })
           OPTIONAL MATCH (l)-[:HAS_MESSAGE]->(m:Message)
           WITH l, m
           RETURN l.idWhatsapp AS id,
                  max(CASE WHEN m.role = 'user' THEN m.at END) AS lastInboundAt,
                  max(CASE WHEN m.role <> 'user' THEN m.at END) AS lastOutboundAt
-        `);
+        `, { org });
 
         const items = [];
         for (const rec of r.records) {
@@ -868,11 +888,12 @@ app.get('/api/leads/:id/followups', async (req, res) => {
     try {
         const id = String(req.params.id || '');
         if (!id) return res.status(400).json({ error: 'id_required' });
+        const org = req.organization_id;
         const r = await session.run(`
-          MATCH (l:Lead { idWhatsapp: $id })-[:HAS_FOLLOWUP]->(f:FollowUp)
+          MATCH (l:Lead { idWhatsapp: $id, organization_id: $org })-[:HAS_FOLLOWUP]->(f:FollowUp { organization_id: $org })
           RETURN f { .*, id: elementId(f) } AS f
           ORDER BY f.scheduledAt ASC
-        `, { id });
+        `, { id, org });
         const items = r.records.map(rec => rec.get('f'));
         return res.json(items);
     } catch (e) {
@@ -885,10 +906,11 @@ app.get('/api/leads/:id/followups', async (req, res) => {
 app.get('/api/followups', async (req, res) => {
     const session = await getSession();
     try {
+        const org = req.organization_id;
         const { status, page = 1, limit = 20 } = req.query;
         const skip = (parseInt(page) - 1) * parseInt(limit);
-        const params = { skip: neo4j.int(skip), limit: neo4j.int(parseInt(limit)) };
-        let where = [];
+        const params = { skip: neo4j.int(skip), limit: neo4j.int(parseInt(limit)), org };
+        let where = ["f.organization_id = $org"];
         if (status) { where.push('f.status = $status'); params.status = String(status); }
         const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
@@ -1065,6 +1087,7 @@ app.get('/api/stats/geral-periodo', async (req, res) => {
 app.get('/api/leads', async (req, res) => { // Este endpoint agora serve para a lista principal de leads
     const neo4jSession = await getSession();
     try {
+        const org = req.organization_id;
         const {
             nome, tag, dor, nivelInteresse, origem,
             dtCriacaoStart, dtCriacaoEnd, dtAtualizacaoStart, dtAtualizacaoEnd,
@@ -1073,7 +1096,7 @@ app.get('/api/leads', async (req, res) => { // Este endpoint agora serve para a 
 
         const skip = (parseInt(page) - 1) * parseInt(limit);
         const params = { skip: neo4j.int(skip), limit: neo4j.int(parseInt(limit)) };
-        let whereClauses = [];
+        let whereClauses = ["l.organization_id = $org"];
         let matchClauses = ["MATCH (l:Lead)"];
 
         if (nome) { whereClauses.push("toLower(l.nome) CONTAINS toLower($nome)"); params.nome = nome; }
@@ -1085,12 +1108,13 @@ app.get('/api/leads', async (req, res) => { // Este endpoint agora serve para a 
         if (dtAtualizacaoStart) { const dt = new Date(dtAtualizacaoStart); dt.setHours(0,0,0,0); whereClauses.push("l.dtUltimaAtualizacao >= $dtAtualizacaoStartMillis"); params.dtAtualizacaoStartMillis = dt.getTime(); }
         if (dtAtualizacaoEnd) { const dt = new Date(dtAtualizacaoEnd); dt.setHours(23,59,59,999); whereClauses.push("l.dtUltimaAtualizacao <= $dtAtualizacaoEndMillis"); params.dtAtualizacaoEndMillis = dt.getTime(); }
 
-        if (tag) { matchClauses.push("MATCH (l)-[:TEM_TAG]->(tg:Tag WHERE tg.nome = $tag)"); params.tag = tag; }
-        if (dor) { matchClauses.push("MATCH (l)-[:TEM_DOR]->(dr:Dor WHERE dr.nome = $dor)"); params.dor = dor; }
+        if (tag) { matchClauses.push("MATCH (l)-[:TEM_TAG]->(tg:Tag)"); whereClauses.push("tg.nome = $tag"); params.tag = tag; }
+        if (dor) { matchClauses.push("MATCH (l)-[:TEM_DOR]->(dr:Dor)"); whereClauses.push("dr.nome = $dor"); params.dor = dor; }
 
         const baseQuery = `${matchClauses.join(" ")} ${whereClauses.length > 0 ? "WHERE " + whereClauses.join(" AND ") : ""}`;
         
         const countQuery = `${baseQuery} RETURN count(DISTINCT l) AS total`;
+        params.org = org;
         const countResult = await neo4jSession.run(countQuery, params);
         const totalItems = countResult.records[0] ? countResult.records[0].get('total').toNumber() : 0;
         const totalPages = Math.ceil(totalItems / parseInt(limit));

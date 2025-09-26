@@ -1,0 +1,67 @@
+version: "3.8"
+
+services:
+  wa1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wa1
+    environment:
+      - PORT=3005
+      - WA_AGENT_PORT=3005
+      - SESSION_NAME=wa-session-1
+      - WA_AGENT_KEY=${WA_AGENT_KEY:-change-me}
+      - NEO4J_URI=${NEO4J_URI}
+      - NEO4J_USER=${NEO4J_USER}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL_NAME=${GEMINI_MODEL_NAME:-gemini-1.5-flash-latest}
+    ports:
+      - "3005:3005"
+    volumes:
+      - wa1_tokens:/app/tokens
+
+  wa2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wa2
+    environment:
+      - PORT=3006
+      - WA_AGENT_PORT=3006
+      - SESSION_NAME=wa-session-2
+      - WA_AGENT_KEY=${WA_AGENT_KEY:-change-me}
+      - NEO4J_URI=${NEO4J_URI}
+      - NEO4J_USER=${NEO4J_USER}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL_NAME=${GEMINI_MODEL_NAME:-gemini-1.5-flash-latest}
+    ports:
+      - "3006:3006"
+    volumes:
+      - wa2_tokens:/app/tokens
+
+  wa3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wa3
+    environment:
+      - PORT=3008
+      - WA_AGENT_PORT=3008
+      - SESSION_NAME=wa-session-3
+      - WA_AGENT_KEY=${WA_AGENT_KEY:-change-me}
+      - NEO4J_URI=${NEO4J_URI}
+      - NEO4J_USER=${NEO4J_USER}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL_NAME=${GEMINI_MODEL_NAME:-gemini-1.5-flash-latest}
+    ports:
+      - "3008:3008"
+    volumes:
+      - wa3_tokens:/app/tokens
+
+volumes:
+  wa1_tokens:
+  wa2_tokens:
+  wa3_tokens:
