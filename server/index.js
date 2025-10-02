@@ -390,7 +390,7 @@ app.get('/api/pipeline/health', async (req, res) => {
         return sum + Math.max(0, (now - ts) / (1000*60*60*24))
       }, 0) / count) : 0
       const totalValue = arr.reduce((sum, l) => sum + Number(l.value || 0), 0)
-      // Proxy simples para “taxa de resposta” usando last_contact recência
+      // Proxy simples para "taxa de resposta" usando last_contact recência
       const recent = arr.filter(l => l.last_contact && (now - Date.parse(l.last_contact)) < 3*24*60*60*1000).length
       const responseRate = count ? Math.round((recent / count) * 100) : 0
       // Score heurístico: maior é melhor
@@ -533,15 +533,106 @@ app.get('/api/followup/queue', async (req, res) => {
 })
 
 // Bridge: Agente WhatsApp -> CRM (intents diretas, autenticado por X-Agent-Key)
+// Proteções: rate limiting, idempotência e verificação opcional de HMAC
+const _agentDispatchIdemCache = new Map(); // key -> { ts, status, body }
+const IDEM_WINDOW_MS = Number(process.env.IDEMPOTENCY_WINDOW_MS || (10 * 60 * 1000));
+const IDEM_MAX_ENTRIES = Number(process.env.IDEMPOTENCY_MAX_ENTRIES || 5000);
+const RATE_WINDOW_MS = Number(process.env.AGENT_RATE_WINDOW_MS || 10000);
+const RATE_MAX = Number(process.env.AGENT_RATE_MAX || 50);
+const AGENT_BODY_MAX_BYTES = Number(process.env.AGENT_BODY_MAX_BYTES || 200000);
+
+const _rateStateByKey = new Map(); // agentKey -> { start, count }
+function _rateAllow(agentKey) {
+  const now = Date.now();
+  const key = String(agentKey || '');
+  let st = _rateStateByKey.get(key) || { start: now, count: 0 };
+  if (now - st.start > RATE_WINDOW_MS) st = { start: now, count: 0 };
+  st.count += 1;
+  _rateStateByKey.set(key, st);
+  return st.count <= RATE_MAX;
+}
+
+function _idemPrune() {
+  while (_agentDispatchIdemCache.size > IDEM_MAX_ENTRIES) {
+    const first = _agentDispatchIdemCache.keys().next().value;
+    if (!first) break;
+    _agentDispatchIdemCache.delete(first);
+  }
+}
+
+function _idemSet(key, status, body) {
+  _agentDispatchIdemCache.set(String(key), { ts: Date.now(), status, body });
+  _idemPrune();
+}
+
+function _idemGet(key) {
+  const rec = _agentDispatchIdemCache.get(String(key));
+  if (!rec) return null;
+  if ((Date.now() - rec.ts) > IDEM_WINDOW_MS) { _agentDispatchIdemCache.delete(String(key)); return null; }
+  return rec;
+}
 app.post('/api/agent/dispatch', async (req, res) => {
   try {
     const agentKey = req.headers['x-agent-key'] || req.headers['X-Agent-Key']
     if (!agentKey || String(agentKey) !== String(process.env.AGENT_API_KEY || '')) {
       return res.status(401).json({ error: 'unauthorized' })
     }
+    // Basic rate limiting por agentKey
+    if (!_rateAllow(agentKey)) return res.status(429).json({ error: 'rate_limited' })
+
+    // Tamanho do corpo
+    try {
+      const rawLen = Buffer.byteLength(JSON.stringify(req.body || {}), 'utf8')
+      if (rawLen > AGENT_BODY_MAX_BYTES) return res.status(413).json({ error: 'payload_too_large' })
+    } catch {}
+
+    // HMAC verification (optional)
+    try {
+      const secret = process.env.AGENT_HMAC_SECRET || process.env.CRM_HMAC_SECRET
+      const ts = req.headers['x-timestamp']
+      const sig = req.headers['x-signature']
+      if (secret && ts && sig) {
+        const crypto = require('crypto')
+        const name = String((req.body && req.body.name) || '')
+        const payload = req.body && req.body.payload ? req.body.payload : {}
+        const payloadStr = JSON.stringify(payload)
+        const payloadHash = crypto.createHash('sha256').update(payloadStr).digest('hex')
+        const base = `${ts}.${name}.${payloadHash}`
+        const expected = crypto.createHmac('sha256', String(secret)).update(base).digest('hex')
+        if (expected !== String(sig)) return res.status(401).json({ error: 'invalid_signature' })
+        const maxSkewMs = Number(process.env.AGENT_HMAC_MAX_SKEW_MS || 5 * 60 * 1000)
+        const tsNum = Number(ts)
+        if (!Number.isFinite(tsNum) || Math.abs(Date.now() - tsNum) > maxSkewMs) {
+          return res.status(401).json({ error: 'timestamp_out_of_range' })
+        }
+      }
+    } catch {}
     const { name, payload } = req.body || {}
     const intent = String(name || '').toLowerCase()
     const p = payload || {}
+
+    // Idempotência (opcional)
+    const idemKey = req.headers['idempotency-key'] || req.headers['Idempotency-Key']
+    if (idemKey) {
+      const found = _idemGet(idemKey)
+      if (found) return res.status(found.status).json(found.body)
+    }
+
+    // Minimal schema validation (defense-in-depth)
+    function fail(msg) { return res.status(400).json({ error: msg }) }
+    if (!intent) return fail('intent_required')
+    if (p == null || typeof p !== 'object') return fail('payload_required')
+    if (intent === 'create_note' || intent === 'create_task') {
+      if (!p.phone && !p.leadId && !p.lead_id) return fail('phone_or_lead_required')
+      if (!p.title) return fail('title_required')
+    }
+    if (intent === 'move_lead') {
+      if (!p.phone && !p.leadId && !p.id) return fail('phone_or_lead_required')
+      if (!p.toStageId && !p.status) return fail('toStageId_required')
+    }
+    if (intent === 'create_lead') {
+      if (!p.organization_id) return fail('organization_id_required')
+    }
 
     async function resolveLead({ lead_id, phone, organization_id }) {
       if (lead_id) {
@@ -580,11 +671,8 @@ app.post('/api/agent/dispatch', async (req, res) => {
       let followupResult = null
       if (type === 'task') {
         try {
-          // Monta waJid a partir do telefone do lead, se houver
           const digits = String(lead.phone || '').replace(/\D/g, '')
           const waJid = digits ? `${digits}@c.us` : null
-
-          // 1) Obter sugestão de follow-up via Agente WA (se disponível)
           let suggestedText = null
           if (waJid) {
             try {
@@ -607,7 +695,6 @@ app.post('/api/agent/dispatch', async (req, res) => {
             } catch {}
           }
 
-          // 2) Criar follow-up no CRM (Agente CRM)
           try {
             const crmBase = process.env.CRM_HTTP_BASE || `http://localhost:${process.env.DASHBOARD_PORT_CRM || 3007}`
             const nowMs = Date.now()
@@ -638,7 +725,9 @@ app.post('/api/agent/dispatch', async (req, res) => {
         } catch {}
       }
 
-      return res.json({ ok: true, taskId: insertedActivity?.id || null, followup: followupResult?.followup || null })
+      const out = { ok: true, taskId: insertedActivity?.id || null, followup: followupResult?.followup || null }
+      if (idemKey) _idemSet(idemKey, 200, out)
+      return res.json(out)
     }
 
     if (intent === 'update_lead') {
@@ -648,7 +737,9 @@ app.post('/api/agent/dispatch', async (req, res) => {
       delete updates.id; delete updates.leadId; delete updates.phone; delete updates.organization_id
       const { error } = await supabaseAdmin.from('leads').update(updates).eq('id', lead.id)
       if (error) return res.status(500).json({ error: error.message })
-      return res.json({ ok: true })
+      const out = { ok: true }
+      if (idemKey) _idemSet(idemKey, 200, out)
+      return res.json(out)
     }
 
     if (intent === 'create_lead') {
@@ -672,7 +763,9 @@ app.post('/api/agent/dispatch', async (req, res) => {
       }
       const { error } = await supabaseAdmin.from('leads').insert([insertPayload])
       if (error) return res.status(500).json({ error: error.message })
-      return res.json({ ok: true })
+      const out = { ok: true }
+      if (idemKey) _idemSet(idemKey, 200, out)
+      return res.json(out)
     }
 
     // Move lead entre estágios
@@ -683,7 +776,9 @@ app.post('/api/agent/dispatch', async (req, res) => {
       if (!toStageId) return res.status(400).json({ error: 'invalid_params_toStageId' })
       const { error } = await supabaseAdmin.from('leads').update({ status: toStageId, last_contact: new Date().toISOString() }).eq('id', lead.id)
       if (error) return res.status(500).json({ error: error.message })
-      return res.json({ ok: true })
+      const out = { ok: true }
+      if (idemKey) _idemSet(idemKey, 200, out)
+      return res.json(out)
     }
 
     // Excluir lead
@@ -692,7 +787,9 @@ app.post('/api/agent/dispatch', async (req, res) => {
       if (!lead) return res.status(404).json({ error: 'lead_not_found' })
       const { error } = await supabaseAdmin.from('leads').delete().eq('id', lead.id)
       if (error) return res.status(500).json({ error: error.message })
-      return res.json({ ok: true })
+      const out = { ok: true }
+      if (idemKey) _idemSet(idemKey, 200, out)
+      return res.json(out)
     }
 
     // Criar vários leads em um estágio
@@ -717,91 +814,14 @@ app.post('/api/agent/dispatch', async (req, res) => {
         user_id: ownerUserId,
         organization_id: orgId,
       }))
-      if (!toInsert.length) return res.json({ ok: true, created: 0 })
       const { error } = await supabaseAdmin.from('leads').insert(toInsert)
       if (error) return res.status(500).json({ error: error.message })
-      return res.json({ ok: true, created: toInsert.length })
+      const out = { ok: true, inserted: toInsert.length }
+      if (idemKey) _idemSet(idemKey, 200, out)
+      return res.json(out)
     }
 
-    // Atualizar/Excluir atividade
-    if (intent === 'update_activity') {
-      const id = String(p.id || '')
-      if (!id) return res.status(400).json({ error: 'invalid_params_id' })
-      const updates = { ...p }
-      delete updates.id
-      const { error } = await supabaseAdmin.from('activities').update(updates).eq('id', id)
-      if (error) return res.status(500).json({ error: error.message })
-      return res.json({ ok: true })
-    }
-    if (intent === 'delete_activity') {
-      const id = String(p.id || '')
-      if (!id) return res.status(400).json({ error: 'invalid_params_id' })
-      const { error } = await supabaseAdmin.from('activities').delete().eq('id', id)
-      if (error) return res.status(500).json({ error: error.message })
-      return res.json({ ok: true })
-    }
-
-    // Deals CRUD
-    if (intent === 'create_deal') {
-      const orgId = p.organization_id || null
-      if (!orgId) return res.status(400).json({ error: 'organization_id_required' })
-      const ownerUserId = await pickOrgOwnerUserId(orgId)
-      if (!ownerUserId) return res.status(400).json({ error: 'org_owner_not_found' })
-      const payload = {
-        lead_id: p?.lead_id || p?.leadId || null,
-        title: String(p?.title || 'Proposta'),
-        description: p?.description ?? null,
-        status: String(p?.status || 'draft'),
-        valid_until: p?.valid_until ?? null,
-        organization_id: orgId,
-        user_id: ownerUserId,
-        total_value: 0,
-      }
-      const { data: deal, error } = await supabaseAdmin.from('deals').insert([payload]).select('*').single()
-      if (error) return res.status(500).json({ error: error.message })
-      // itens opcionais
-      const items = Array.isArray(p?.items) ? p.items : []
-      if (items.length) {
-        const toInsert = items.map((it) => ({
-          deal_id: deal.id,
-          product_id: it?.product_id ?? null,
-          product_name: String(it?.product_name || 'Item'),
-          quantity: Number(it?.quantity || 1),
-          unit_price: Number(it?.unit_price || 0),
-          total_price: Number(it?.quantity || 1) * Number(it?.unit_price || 0),
-        }))
-        const { error: iErr } = await supabaseAdmin.from('deal_items').insert(toInsert)
-        if (iErr) return res.status(500).json({ error: iErr.message })
-        const total = toInsert.reduce((s, it) => s + Number(it.total_price), 0)
-        await supabaseAdmin.from('deals').update({ total_value: total }).eq('id', deal.id)
-      }
-      return res.json({ ok: true, id: deal.id })
-    }
-    if (intent === 'update_deal') {
-      const id = String(p.id || '')
-      if (!id) return res.status(400).json({ error: 'invalid_params_id' })
-      const updates = { ...p }
-      delete updates.id
-      const { data, error } = await supabaseAdmin.from('deals').update(updates).eq('id', id).select('*').single()
-      if (error) return res.status(500).json({ error: error.message })
-      // regra: se aceitar/recusar, mover lead
-      try {
-        if ((updates.status === 'accepted' || updates.status === 'rejected') && data?.lead_id) {
-          const nextLeadStatus = updates.status === 'accepted' ? 'closed-won' : 'closed-lost'
-          await supabaseAdmin.from('leads').update({ status: nextLeadStatus }).eq('id', data.lead_id)
-        }
-      } catch {}
-      return res.json({ ok: true })
-    }
-    if (intent === 'delete_deal') {
-      const id = String(p.id || '')
-      if (!id) return res.status(400).json({ error: 'invalid_params_id' })
-      const { error } = await supabaseAdmin.from('deals').delete().eq('id', id)
-      if (error) return res.status(500).json({ error: error.message })
-      return res.json({ ok: true })
-    }
-
-    return res.status(400).json({ error: 'unknown_intent' })
+    return res.status(400).json({ error: 'intent_not_supported' })
   } catch (e) {
     return res.status(500).json({ error: String(e?.message || e) })
   }

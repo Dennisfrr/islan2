@@ -14,7 +14,7 @@ import ResetPassword from "./pages/ResetPassword";
 import AgentPage from "./pages/Agent";
 import GoalsPage from "./pages/Goals";
 import FollowupsPage from "./pages/Followups";
-import StrategiesPage from "./pages/Strategies";
+// import StrategiesPage from "./pages/Strategies";
 import StarfieldBackground from "@/components/background/Starfield";
 import GoalCoach from "@/components/goals/GoalCoach";
 import AgentChat from "@/components/crm/AgentChat";
@@ -89,16 +89,18 @@ function AppRoutes() {
             </ProtectedRoute>
           }
         />
-        <Route 
-          path="/strategies" 
-          element={
-            <ProtectedRoute>
-              <OrgProvider>
-                <StrategiesPage />
-              </OrgProvider>
-            </ProtectedRoute>
-          }
-        />
+        {false && (
+          <Route 
+            path="/strategies" 
+            element={
+              <ProtectedRoute>
+                <OrgProvider>
+                  {/* <StrategiesPage /> */}
+                </OrgProvider>
+              </ProtectedRoute>
+            }
+          />
+        )}
         <Route path="/preview/deal/:id" element={<DealPreview />} />
         <Route path="*" element={<NotFound />} />
       </Routes>

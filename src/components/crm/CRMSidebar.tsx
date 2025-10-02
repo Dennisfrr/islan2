@@ -28,7 +28,6 @@ export function CRMSidebar({ selectedView, onViewChange, collapsed, onToggleColl
     { id: "activities", label: "Atividades", icon: CheckSquare },
     { id: "tasks", label: "Tarefas", icon: Calendar },
     { id: "goals", label: "Metas", icon: Target },
-    { id: "strategies", label: "Estratégias", icon: BarChart3 },
     { id: "settings", label: "Configurações", icon: Settings },
     // Employees: admin e manager (alinha com permissões do backend)
     ...(role === 'admin' || role === 'manager' ? [{ id: 'employees', label: 'Funcionários', icon: Users }] as const : []),
@@ -81,7 +80,6 @@ export function CRMSidebar({ selectedView, onViewChange, collapsed, onToggleColl
                     }`}
                     onClick={() => {
                       if (item.id === 'goals') { onViewChange('goals'); }
-                      else if (item.id === 'strategies') { navigate('/strategies'); }
                       else if (item.id === 'followups') { navigate('/followups'); }
                       else { onViewChange(item.id) }
                     }}

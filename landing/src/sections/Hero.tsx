@@ -4,7 +4,7 @@ export function Hero() {
     <header className="hero">
       <div className="container">
         <nav className="nav">
-          <div className="logo">CRM Pro</div>
+          <div className="logo">lumia</div>
           <div className="nav-actions">
             <a className="btn ghost" href="#precos">Preços</a>
             <a className="btn primary" href={payUrl} target="_blank">Começar agora</a>

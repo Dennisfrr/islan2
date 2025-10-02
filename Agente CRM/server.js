@@ -245,7 +245,7 @@ function getNodeTitle(properties, labels, id) {
 }
 
 // =========================================================================
-// ENDPOINTS PARA KORA BRAIN DASHBOARD
+// ENDPOINTS PARA LUMIA DASHBOARD
 // =========================================================================
 
 // 1. Configurações do Agente
@@ -254,7 +254,7 @@ app.get('/api/agent/config', async (req, res) => {
         // Em um cenário real, estas configs viriam de um arquivo, DB, ou do próprio agente principal.
         // Por agora, vamos simular com base nas variáveis de ambiente e constantes do agente.
         const agentConfig = {
-            agentName: process.env.NOME_DO_AGENTE || "Leo Consultor",
+            agentName: process.env.NOME_DO_AGENTE || "Lumia Consultor",
             llmModel: process.env.GEMINI_MODEL_NAME || "gemini-1.5-flash-latest", // Supondo que você tenha uma var de ambiente para isso
             temperature: parseFloat(process.env.GEMINI_TEMPERATURE) || 0.65,
             debounceDelayMs: parseInt(process.env.DEBOUNCE_DELAY_MS) || 7500,
@@ -1227,7 +1227,7 @@ app.get('/api/graph/overview-formatted', async (req, res) => {
 // INICIALIZAÇÃO E SHUTDOWN
 // =========================================================================
 app.listen(PORT, () => {
-    console.log(`Servidor da API da Dashboard Kora Brain rodando na porta ${PORT}`);
+    console.log(`Servidor da API da Dashboard Lumia rodando na porta ${PORT}`);
     getSession().then(session => {
         console.log("Conexão com Neo4j verificada com sucesso para a API da dashboard.");
         session.close();
@@ -1240,12 +1240,12 @@ let isShuttingDown = false;
 async function shutdown() {
     if (isShuttingDown) return;
     isShuttingDown = true;
-    console.log('Recebido sinal para encerrar a API da dashboard Kora Brain...');
+    console.log('Recebido sinal para encerrar a API da dashboard Lumia...');
     try {
         await closeDriver();
-        console.log('Driver Neo4j da API da dashboard Kora Brain fechado.');
+        console.log('Driver Neo4j da API da dashboard Lumia fechado.');
     } catch (e) {
-        console.error('Erro ao fechar driver Neo4j da API Kora Brain:', e);
+        console.error('Erro ao fechar driver Neo4j da API Lumia:', e);
     }
     process.exit(0);
 }
@@ -1253,9 +1253,9 @@ async function shutdown() {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 process.on('uncaughtException', (error, origin) => {
-  console.error(`API Dashboard Kora Brain - Exceção não capturada: ${error.message}`, error.stack, `Origem: ${origin}`);
+  console.error(`API Dashboard Lumia - Exceção não capturada: ${error.message}`, error.stack, `Origem: ${origin}`);
 });
 process.on('unhandledRejection', (reason, promise) => {
-  console.error('API Dashboard Kora Brain - Rejeição de Promise não tratada:', reason, 'Promise:', promise);
+  console.error('API Dashboard Lumia - Rejeição de Promise não tratada:', reason, 'Promise:', promise);
 });
 
