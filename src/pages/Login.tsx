@@ -77,10 +77,9 @@ export default function Login() {
     <div className="min-h-screen bg-gradient-dark flex items-center justify-center p-4">
       <Card className="w-full max-w-md backdrop-blur-sm border border-border shadow-card">
         <CardHeader className="text-center space-y-2">
-          <div className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4 bg-primary text-primary-foreground shadow-glow">
-            <img src="/logo.jpg" alt="Lumia" className="w-12 h-12 object-contain" />
+          <div className="w-24 h-24 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-glow">
+            <img src="/logo.jpg" alt="Lumia" className="w-24 h-24 object-contain mix-blend-multiply dark:mix-blend-screen" />
           </div>
-          <CardTitle className="text-2xl font-bold text-foreground">Lumia</CardTitle>
           <CardDescription className="text-muted-foreground">
             Gerencie seus leads e vendas de forma eficiente
           </CardDescription>
