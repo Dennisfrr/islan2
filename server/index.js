@@ -112,17 +112,7 @@ const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { autoRefreshToken: false, persistSession: false }
 })
 
-async function getUserFromAuthHeader(req) {
-  const auth = String(req.headers['authorization'] || '')
-  const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
-  if (!token) return null
-  try {
-    const r = await fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { Authorization: `Bearer ${token}`, apikey: SUPABASE_SERVICE_ROLE_KEY } })
-    const j = await r.json().catch(() => ({}))
-    if (!r.ok) return null
-    return { id: j?.id || null, email: j?.email || null }
-  } catch { return null }
-}
+// removed duplicate getUserFromAuthHeader (use the one with supabaseAdmin.auth.getUser below)
 
 async function getUserOrgId(userId) {
   try {
