@@ -514,3 +514,39 @@ FOR DELETE USING (
   )
 );
 
+
+-- ==========================================
+-- TABELA: AUDIT LOGS (Segurança e Auditoria)
+-- ==========================================
+CREATE TABLE IF NOT EXISTS public.audit_logs (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    organization_id UUID REFERENCES public.organizations(id),
+    user_id UUID REFERENCES auth.users,
+    action TEXT NOT NULL,                  -- ex.: agent.start, wa.dispatch, agent.emotion.refresh
+    resource_type TEXT,                    -- ex.: lead, deal, activity
+    resource_id TEXT,                      -- id do recurso afetado
+    payload JSONB,                         -- request reduzido (sem PII sensível)
+    ip TEXT,
+    user_agent TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+ALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;
+
+-- Membros da organização podem visualizar logs da própria organização
+CREATE POLICY "Org members can view audit logs" ON public.audit_logs
+FOR SELECT USING (
+  EXISTS (
+    SELECT 1 FROM public.organization_members m
+    WHERE m.user_id = auth.uid() AND m.organization_id = audit_logs.organization_id
+  )
+);
+
+-- Inserção: tipicamente via service role; se não, permitir que o próprio usuário insira para sua org
+CREATE POLICY "Users can insert own org audit" ON public.audit_logs
+FOR INSERT WITH CHECK (
+  EXISTS (
+    SELECT 1 FROM public.organization_members m
+    WHERE m.user_id = auth.uid() AND m.organization_id = audit_logs.organization_id
+  )
+);

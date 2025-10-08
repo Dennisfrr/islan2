@@ -55,6 +55,21 @@ async function proxyToWA(req, res, targetPath) {
     if (req.headers['x-agent-key']) headers['X-Agent-Key'] = req.headers['x-agent-key']
     const envKey = process.env.WA_AGENT_KEY || process.env.CRM_AGENT_KEY || process.env.AGENT_API_KEY
     if (envKey && !headers['X-Agent-Key']) headers['X-Agent-Key'] = String(envKey)
+    if (req.headers['idempotency-key']) headers['Idempotency-Key'] = String(req.headers['idempotency-key'])
+    // Add request signature (HMAC) + nonce to protect integrity/replay
+    try {
+      const secret = String(process.env.AGENT_SIGNING_SECRET || '')
+      const nonce = crypto.randomBytes(12).toString('hex')
+      const ts = Math.floor(Date.now() / 1000)
+      const bodyStr = (req.method === 'GET' || req.method === 'HEAD') ? '' : (typeof req.body === 'string' ? req.body : JSON.stringify(req.body || {}))
+      const base = `${req.method}\n${targetPath}\n${ts}\n${nonce}\n${bodyStr}`
+      const sig = secret ? crypto.createHmac('sha256', secret).update(base).digest('hex') : ''
+      if (sig) {
+        headers['X-Req-Nonce'] = nonce
+        headers['X-Req-Timestamp'] = String(ts)
+        headers['X-Req-Signature'] = `sha256=${sig}`
+      }
+    } catch {}
     const init = { method: req.method, headers }
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       init.body = typeof req.body === 'string' ? req.body : JSON.stringify(req.body || {})
@@ -97,6 +112,31 @@ const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { autoRefreshToken: false, persistSession: false }
 })
 
+async function getUserFromAuthHeader(req) {
+  const auth = String(req.headers['authorization'] || '')
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
+  if (!token) return null
+  try {
+    const r = await fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { Authorization: `Bearer ${token}`, apikey: SUPABASE_SERVICE_ROLE_KEY } })
+    const j = await r.json().catch(() => ({}))
+    if (!r.ok) return null
+    return { id: j?.id || null, email: j?.email || null }
+  } catch { return null }
+}
+
+async function getUserOrgId(userId) {
+  try {
+    const { data } = await supabaseAdmin.from('organization_members').select('organization_id').eq('user_id', userId).limit(1).maybeSingle()
+    return data?.organization_id || null
+  } catch { return null }
+}
+
+async function insertAuditLog({ organization_id, user_id, action, resource_type, resource_id, payload, ip, user_agent }) {
+  try {
+    await supabaseAdmin.from('audit_logs').insert({ organization_id, user_id, action, resource_type, resource_id, payload, ip, user_agent })
+  } catch (e) { /* ignore */ }
+}
+
 // ================================
 // Agent process manager (Agente WhatsaApp)
 // ================================
@@ -106,7 +146,12 @@ let agentLastExit = { code: null, signal: null, at: null }
 
 function getAgentDir() {
   // Agent folder is at project root, not under server/
-  return path.join(__dirname, '..', 'Agente WhatsaApp')
+  const override = process.env.AGENT_DIR && String(process.env.AGENT_DIR).trim()
+  if (override && fs.existsSync(override)) return override
+  const candidate1 = path.join(__dirname, '..', 'Agente WhatsaApp Matheus')
+  if (fs.existsSync(candidate1)) return candidate1
+  const candidate2 = path.join(__dirname, '..', 'Agente WhatsaApp')
+  return candidate2
 }
 
 function isAgentRunning() {
@@ -120,6 +165,43 @@ function getAgentHttpBase() {
 
 app.get('/api/agent/status', async (req, res) => {
   return res.json({ running: isAgentRunning(), pid: agentProcess?.pid || null, startedAt: agentStartedAt, lastExit: agentLastExit })
+})
+
+// Get agent policy (for dashboard or agent)
+app.get('/api/agent/policy', async (req, res) => {
+  try {
+    const xKey = String(req.headers['x-agent-key'] || '')
+    const envKey = process.env.WA_AGENT_KEY || process.env.CRM_AGENT_KEY || process.env.AGENT_API_KEY || ''
+    const hasAgentKey = envKey && xKey && xKey === envKey
+    let uid = null
+    if (!hasAgentKey) {
+      const u = await getUserFromAuthHeader(req)
+      if (!u?.id) return res.status(401).json({ error: 'unauthorized' })
+      uid = u.id
+    }
+    const organizationId = String(req.query.organization_id || '') || (uid ? await getUserOrgId(uid) : '')
+    if (!organizationId) return res.status(400).json({ error: 'organization_id_required' })
+    const { data, error } = await supabaseAdmin
+      .from('organization_settings')
+      .select('value')
+      .eq('organization_id', organizationId)
+      .eq('key', 'agent_policy')
+      .maybeSingle()
+    if (error) return res.status(500).json({ error: 'db_error' })
+    const defaults = {
+      autopilotLevel: 'suggest',
+      cadencePerLeadPerDay: 1,
+      allowedHours: '09:00-18:00',
+      tonePolicy: 'consultivo',
+      disallowedTerms: '',
+      allowedChannels: { whatsapp: true, email: false, sms: false },
+      approvalRequired: { dispatch: false, contract: true, quote: false },
+    }
+    const merged = { ...defaults, ...(data?.value || {}) }
+    return res.json({ organization_id: organizationId, policy: merged })
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) })
+  }
 })
 
 app.post('/api/agent/start', async (req, res) => {
@@ -173,6 +255,8 @@ app.post('/api/agent/lead-emotion/refresh', async (req, res) => {
     const r = await fetch(`${getAgentHttpBase()}/api/leads/${encodeURIComponent(id)}/emotion/refresh`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) })
     const j = await r.json().catch(() => ({}))
     if (!r.ok) return res.status(r.status).json(j)
+    // Audit
+    try { await insertAuditLog({ organization_id: await getUserOrgId(user.id), user_id: user.id, action: 'agent.emotion.refresh', resource_type: 'lead', resource_id: id, payload: { by: user.id } }) } catch {}
     return res.json(j)
   } catch (e) {
     return res.status(500).json({ error: String(e?.message || e) })
@@ -241,6 +325,8 @@ app.post('/api/agent/lead-profile/refresh', async (req, res) => {
     const r = await fetch(`${getAgentHttpBase()}/api/leads/${encodeURIComponent(id)}/analyze`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) })
     const j = await r.json().catch(() => ({}))
     if (!r.ok) return res.status(r.status).json(j)
+    // Audit
+    try { await insertAuditLog({ organization_id: await getUserOrgId(user.id), user_id: user.id, action: 'agent.profile.refresh', resource_type: 'lead', resource_id: id, payload: { by: user.id } }) } catch {}
     return res.json({ ok: true, result: j })
   } catch (e) {
     return res.status(500).json({ error: String(e?.message || e) })
@@ -841,8 +927,79 @@ app.get('/api/goals', (req, res) => proxyToCRM(req, res, `/api/goals`))
 app.post('/api/dashboard/summary', (req, res) => proxyToCRM(req, res, `/api/dashboard/summary`))
 app.get('/api/analytics/reflections', (req, res) => proxyToCRM(req, res, `/api/analytics/reflections`))
 
-// Proxy WhatsApp Agent
-app.post('/api/wa/dispatch', (req, res) => proxyToWA(req, res, `/api/wa/dispatch`))
+// Proxy WhatsApp Agent (com auditoria)
+app.post('/api/wa/dispatch', async (req, res) => {
+  try {
+    const user = await getUserFromAuthHeader(req)
+    if (!user?.id) return res.status(401).json({ error: 'unauthorized' })
+    const out = await proxyToWA(req, res, `/api/wa/dispatch`)
+    try {
+      const orgId = await getUserOrgId(user.id)
+      const payload = { to: req.body?.to || null, type: req.body?.type || null }
+      await insertAuditLog({ organization_id: orgId, user_id: user.id, action: 'wa.dispatch', resource_type: 'message', resource_id: null, payload, ip: req.ip, user_agent: String(req.headers['user-agent'] || '') })
+    } catch {}
+    return out
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) })
+  }
+})
+
+// Proxy: Next Best Action
+app.get('/api/agent/nba', async (req, res) => {
+  try {
+    const user = await getUserFromAuthHeader(req)
+    if (!user?.id) return res.status(401).json({ error: 'unauthorized' })
+    const params = []
+    const phone = String(req.query.phone || '').replace(/\D/g, '')
+    const waId = String(req.query.waId || '')
+    if (phone) params.push(`phone=${encodeURIComponent(phone)}`)
+    if (waId) params.push(`waId=${encodeURIComponent(waId)}`)
+    const q = params.length ? `?${params.join('&')}` : ''
+    return proxyToWA(req, res, `/api/agent/nba${q}`)
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) })
+  }
+})
+
+// Proxy: Generate follow-up text
+app.post('/api/wa/followup/generate', async (req, res) => {
+  try {
+    const user = await getUserFromAuthHeader(req)
+    if (!user?.id) return res.status(401).json({ error: 'unauthorized' })
+    return proxyToWA(req, res, `/api/wa/followup/generate`)
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) })
+  }
+})
+
+// Agent-driven CRM: move lead stage (no user approval when agent key provided)
+app.post('/api/agent/crm/move-lead', async (req, res) => {
+  try {
+    const hasAgentKey = (() => {
+      const provided = String(req.headers['x-agent-key'] || '')
+      const envKey = String(process.env.WA_AGENT_KEY || process.env.CRM_AGENT_KEY || process.env.AGENT_API_KEY || '')
+      return Boolean(provided && envKey && provided === envKey)
+    })()
+    let user = null
+    if (!hasAgentKey) {
+      user = await getUserFromAuthHeader(req)
+      if (!user?.id) return res.status(401).json({ error: 'unauthorized' })
+    }
+    const leadId = String(req.body?.lead_id || req.body?.leadId || '')
+    const toStageId = String(req.body?.to_stage_id || req.body?.toStageId || req.body?.status || '')
+    if (!leadId || !toStageId) return res.status(400).json({ error: 'invalid_params' })
+    // Fetch lead to get org
+    const { data: leadRow, error: selErr } = await supabaseAdmin.from('leads').select('id, organization_id, status').eq('id', leadId).maybeSingle()
+    if (selErr) return res.status(500).json({ error: 'db_error' })
+    if (!leadRow) return res.status(404).json({ error: 'lead_not_found' })
+    const { error: updErr } = await supabaseAdmin.from('leads').update({ status: toStageId }).eq('id', leadId)
+    if (updErr) return res.status(500).json({ error: 'update_failed' })
+    try { await insertAuditLog({ organization_id: leadRow.organization_id || null, user_id: user?.id || null, action: 'lead.move', resource_type: 'lead', resource_id: leadId, payload: { to: toStageId, by: user?.id || 'agent' }, ip: req.ip, user_agent: String(req.headers['user-agent'] || '') }) } catch {}
+    return res.json({ ok: true })
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) })
+  }
+})
 
 // Provedor de WhatsApp: 'meta' (oficial), 'wapi', 'ultramsg', 'greenapi', 'zapi' ou 'wppconnect'
 const WHATSAPP_PROVIDER = (process.env.WHATSAPP_PROVIDER || 'wppconnect').toLowerCase()

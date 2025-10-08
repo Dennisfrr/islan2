@@ -578,6 +578,183 @@ export default function KommoCRM() {
             })
             return { ok: true }
           },
+          // ===== New intents: lead_ops =====
+          'assign_lead': async (p: any) => {
+            const leadId = String(p?.leadId || p?.id || '')
+            const assignee = String(p?.to || p?.toUser || p?.toUserName || '')
+            const existing = leads.find(l => l.id === leadId)
+            if (!existing || !assignee) return { ok: false, error: 'invalid_params' }
+            await new Promise<void>((resolve, reject) => {
+              updateLead({ ...existing, responsible: assignee } as any, { onSuccess: () => resolve(), onError: (e: any) => reject(e) })
+            })
+            return { ok: true }
+          },
+          'tag_lead': async (p: any) => {
+            const leadId = String(p?.leadId || p?.id || '')
+            const tags = Array.isArray(p?.tags) ? p.tags.filter(Boolean) : []
+            const existing = leads.find(l => l.id === leadId)
+            if (!existing || tags.length === 0) return { ok: false, error: 'invalid_params' }
+            const nextTags = Array.from(new Set([...(existing.tags || []), ...tags]))
+            await new Promise<void>((resolve, reject) => {
+              updateLead({ ...existing, tags: nextTags } as any, { onSuccess: () => resolve(), onError: (e: any) => reject(e) })
+            })
+            return { ok: true, tags: nextTags }
+          },
+          'set_lead_priority': async (p: any) => {
+            const leadId = String(p?.leadId || p?.id || '')
+            const priority = Number(p?.priority)
+            const existing = leads.find(l => l.id === leadId)
+            if (!existing || !(priority >= 1 && priority <= 5)) return { ok: false, error: 'invalid_params' }
+            const other = (existing.tags || []).filter((t: string) => !/^priority:\d$/.test(String(t)))
+            const nextTags = [...other, `priority:${priority}`]
+            await new Promise<void>((resolve, reject) => {
+              updateLead({ ...existing, tags: nextTags } as any, { onSuccess: () => resolve(), onError: (e: any) => reject(e) })
+            })
+            return { ok: true, tags: nextTags }
+          },
+          'qualify_lead': async (p: any) => {
+            const leadId = String(p?.leadId || p?.id || '')
+            const existing = leads.find(l => l.id === leadId)
+            if (!existing) return { ok: false, error: 'lead_not_found' }
+            await new Promise<void>((resolve, reject) => {
+              updateLead({ ...existing, status: 'qualified' } as any, { onSuccess: () => resolve(), onError: (e: any) => reject(e) })
+            })
+            return { ok: true }
+          },
+          'disqualify_lead': async (p: any) => {
+            const leadId = String(p?.leadId || p?.id || '')
+            const reason = p?.reason ? String(p.reason) : null
+            const existing = leads.find(l => l.id === leadId)
+            if (!existing) return { ok: false, error: 'lead_not_found' }
+            const notes = reason ? `${existing.notes ? existing.notes + '\n' : ''}Lost reason: ${reason}` : existing.notes
+            await new Promise<void>((resolve, reject) => {
+              updateLead({ ...existing, status: 'closed-lost', notes } as any, { onSuccess: () => resolve(), onError: (e: any) => reject(e) })
+            })
+            return { ok: true }
+          },
+          // ===== pipeline helpers =====
+          'move_lead_to_next_stage': async (p: any) => {
+            const leadId = String(p?.leadId || p?.id || '')
+            const existing = leads.find(l => l.id === leadId)
+            if (!existing) return { ok: false, error: 'lead_not_found' }
+            const order = pipelineStages.map(s => s.id)
+            const idx = order.indexOf(existing.status)
+            const next = idx >= 0 && idx < order.length - 1 ? order[idx + 1] : existing.status
+            if (next === existing.status) return { ok: true, unchanged: true }
+            await new Promise<void>((resolve, reject) => {
+              updateLead({ ...existing, status: next } as any, { onSuccess: () => resolve(), onError: (e: any) => reject(e) })
+            })
+            return { ok: true, status: next }
+          },
+          // ===== activities/tasks =====
+          'create_followup': async (p: any) => {
+            const leadId = String(p?.leadId || p?.id || '')
+            const when = p?.when ? String(p.when) : undefined
+            const channel = p?.channel ? String(p.channel) : undefined
+            const title = `Follow-up${channel ? ` (${channel})` : ''}`
+            if (!leadId) return { ok: false, error: 'invalid_params' }
+            await new Promise<void>((resolve, reject) => {
+              createActivity({ lead_id: leadId, type: 'task', title, due_date: when, completed: false } as any, { onSuccess: () => resolve(), onError: (e: any) => reject(e) })
+            })
+            return { ok: true }
+          },
+          'schedule_call': async (p: any) => {
+            const leadId = String(p?.leadId || p?.id || '')
+            const when = p?.when ? String(p.when) : undefined
+            const agendaNotes = p?.agendaNotes ? String(p.agendaNotes) : undefined
+            if (!leadId) return { ok: false, error: 'invalid_params' }
+            await new Promise<void>((resolve, reject) => {
+              createActivity({ lead_id: leadId, type: 'call', title: 'Chamada agendada', description: agendaNotes, due_date: when, completed: false } as any, { onSuccess: () => resolve(), onError: (e: any) => reject(e) })
+            })
+            return { ok: true }
+          },
+          'snooze_activity': async (p: any) => {
+            const id = String(p?.activityId || p?.id || '')
+            const until = String(p?.until || '')
+            if (!id || !until) return { ok: false, error: 'invalid_params' }
+            await new Promise<void>((resolve, reject) => {
+              updateActivity({ id, due_date: until } as any, { onSuccess: () => resolve(), onError: (e: any) => reject(e) })
+            })
+            return { ok: true }
+          },
+          'complete_activity': async (p: any) => {
+            const id = String(p?.activityId || p?.id || '')
+            if (!id) return { ok: false, error: 'invalid_params' }
+            await new Promise<void>((resolve, reject) => {
+              updateActivity({ id, completed: true } as any, { onSuccess: () => resolve(), onError: (e: any) => reject(e) })
+            })
+            return { ok: true }
+          },
+          // ===== communications / dispatch via agent =====
+          'send_message': async (p: any) => {
+            const to = String(p?.to || '')
+            const leadId = String(p?.leadId || '')
+            const text = String(p?.text || p?.message || '')
+            const type = String(p?.type || 'text')
+            let waTo = to
+            if (!waTo && leadId) {
+              const l = leads.find(x => x.id === leadId)
+              const digits = String(l?.phone || '').replace(/\D/g, '')
+              if (digits) waTo = `${digits}@c.us`
+            }
+            if (!waTo || !text) return { ok: false, error: 'invalid_params' }
+            const r = await apiFetch('/api/wa/dispatch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ to: waTo, type, text }) })
+            const js = await r.json().catch(() => ({}))
+            return { ok: r.ok, result: js }
+          },
+          // ===== AI / insights =====
+          'refresh_emotion': async (p: any) => {
+            const phone = String(p?.phone || '').replace(/\D/g, '')
+            const waId = String(p?.waId || '')
+            if (!phone && !waId) return { ok: false, error: 'invalid_params' }
+            const r = await apiFetch('/api/agent/lead-emotion/refresh', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone, waId }) })
+            return { ok: r.ok }
+          },
+          'fetch_lead_profile': async (p: any) => {
+            const phone = String(p?.phone || '').replace(/\D/g, '')
+            const waId = String(p?.waId || '')
+            if (!phone && !waId) return { ok: false, error: 'invalid_params' }
+            const q = phone ? `phone=${encodeURIComponent(phone)}` : `waId=${encodeURIComponent(waId)}`
+            const r = await apiFetch(`/api/agent/lead-profile?${q}`)
+            const js = await r.json().catch(() => ({}))
+            return { ok: r.ok, result: js }
+          },
+          'precall_script': async (p: any) => {
+            const phone = String(p?.phone || '').replace(/\D/g, '')
+            const waId = String(p?.waId || '')
+            if (!phone && !waId) return { ok: false, error: 'invalid_params' }
+            const q = phone ? `phone=${encodeURIComponent(phone)}` : `waId=${encodeURIComponent(waId)}`
+            const r = await apiFetch(`/api/agent/precall?${q}`)
+            const js = await r.json().catch(() => ({}))
+            return { ok: r.ok, result: js }
+          },
+          'suggest_followup': async (p: any) => {
+            const leadId = String(p?.leadId || p?.id || '')
+            if (!leadId) return { ok: false, error: 'invalid_params' }
+            const r = await apiFetch('/api/agent/suggest-followup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lead_id: leadId }) })
+            const js = await r.json().catch(() => ({}))
+            return { ok: r.ok, result: js }
+          },
+          'compute_ai_score': async (p: any) => {
+            const leadId = String(p?.leadId || p?.id || '')
+            if (!leadId) return { ok: false, error: 'invalid_params' }
+            const r = await apiFetch(`/api/leads/ai-score?lead_id=${encodeURIComponent(leadId)}`)
+            const js = await r.json().catch(() => ({}))
+            return { ok: r.ok, result: js }
+          },
+          'rank_followups': async (p: any) => {
+            if (!orgId) return { ok: false, error: 'org_required' }
+            const r = await apiFetch(`/api/followup/queue?organization_id=${encodeURIComponent(orgId)}`)
+            const js = await r.json().catch(() => ({}))
+            return { ok: r.ok, result: js }
+          },
+          // ===== reporting =====
+          'pipeline_health_report': async (p: any) => {
+            if (!orgId) return { ok: false, error: 'org_required' }
+            const r = await apiFetch(`/api/pipeline/health?organization_id=${encodeURIComponent(orgId)}`)
+            const js = await r.json().catch(() => ({}))
+            return { ok: r.ok, result: js }
+          },
         }
         const fn = map[n]
         if (!fn) return { ok: false, error: 'unknown_intent' }
@@ -791,6 +968,23 @@ export default function KommoCRM() {
                 <Card className="card-spotlight card-tilt card-gradient-border p-4">
                   <div className="text-xs text-muted-foreground">Deals Fechados</div>
                   <div className="text-2xl font-semibold text-primary mt-1">{stats.byStatus['closed-won']}</div>
+                </Card>
+              </div>
+
+              {/* Sentiment distribution chart */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                <Card className="p-4">
+                  <div className="text-sm font-medium text-foreground mb-2">Distribuição de Sentimento (Agente)</div>
+                  <ChartContainer config={{ value: { label: 'Qtd', color: 'hsl(var(--primary))' } }} className="w-full h-64">
+                    <PieChart>
+                      <Pie data={sentimentData} dataKey="value" nameKey="name" outerRadius={80} label>
+                        {sentimentData.map((entry, index) => (
+                          <Cell key={`cell-${index}`} fill={entry.fill} />
+                        ))}
+                      </Pie>
+                      <ChartTooltip content={<ChartTooltipContent />} />
+                    </PieChart>
+                  </ChartContainer>
                 </Card>
               </div>
 
@@ -1050,152 +1244,14 @@ export default function KommoCRM() {
 
       {/* Lead Details Modal */}
       <Dialog open={isDetailsModalOpen} onOpenChange={setIsDetailsModalOpen}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-w-3xl">
           <DialogHeader>
             <DialogTitle>Detalhes do Lead</DialogTitle>
           </DialogHeader>
           {selectedLead && (
             <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <Label className="text-sm font-medium">Nome</Label>
-                  <p className="text-sm">{selectedLead.name}</p>
-                </div>
-                <div>
-                  <Label className="text-sm font-medium">Empresa</Label>
-                  <p className="text-sm">{selectedLead.company}</p>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <Label className="text-sm font-medium">Email</Label>
-                  <p className="text-sm">{selectedLead.email || "Não informado"}</p>
-                </div>
-                <div>
-                  <Label className="text-sm font-medium">Telefone</Label>
-                  <p className="text-sm">{selectedLead.phone || "Não informado"}</p>
-                </div>
-              </div>
-              <div className="grid grid-cols-3 gap-4">
-                <div>
-                  <Label className="text-sm font-medium">Valor</Label>
-                  <p className="text-sm font-bold text-success">R$ {selectedLead.value.toLocaleString('pt-BR')}</p>
-                </div>
-                <div>
-                  <Label className="text-sm font-medium">Status</Label>
-                  <Badge variant="outline">{selectedLead.status}</Badge>
-                </div>
-                <div>
-                  <Label className="text-sm font-medium">Responsável</Label>
-                  <p className="text-sm">{selectedLead.responsible}</p>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <Label className="text-sm font-medium">Origem</Label>
-                  <p className="text-sm">{selectedLead.source}</p>
-                </div>
-                <div>
-                  <Label className="text-sm font-medium">Tags</Label>
-                  <div className="flex flex-wrap gap-1">
-                    {(selectedLead.tags ?? []).map((tag: string) => (
-                      <Badge key={tag} variant="secondary" className="text-xs">{tag}</Badge>
-                    ))}
-                  </div>
-                </div>
-              </div>
-              {selectedLead.notes && (
-                <div>
-                  <Label className="text-sm font-medium">Observações</Label>
-                  <p className="text-sm bg-muted p-3 rounded-md">{selectedLead.notes}</p>
-                </div>
-              )}
-              {/* Perfil IA (via Agente) */}
-              <div className="rounded-md border p-3">
-                <Label className="text-sm font-medium">Perfil IA</Label>
-                <div className="flex items-center gap-2 mb-2">
-                  <Button size="sm" variant="outline" onClick={async () => {
-                    try {
-                      if (!selectedLead?.phone) return
-                      await apiFetch('/api/agent/lead-profile/refresh', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone: selectedLead.phone }) })
-                      toast({ title: 'Perfil atualizado', description: 'Análise via IA concluída.' })
-                    } catch (e: any) {
-                      toast({ title: 'Erro', description: String(e?.message || e), variant: 'destructive' })
-                    }
-                  }}>Atualizar perfil via IA</Button>
-                  <Button size="sm" onClick={async () => {
-                    try {
-                      const phoneDigits = String(selectedLead?.phone || '').replace(/\D/g, '')
-                      const r = await apiFetch(`/api/agent/precall?${phoneDigits ? `phone=${encodeURIComponent(phoneDigits)}` : ''}`)
-                      const js = await r.json().catch(() => ({} as any))
-                      const q = Array.isArray(js?.suggestedQuestions) && js.suggestedQuestions[0] ? String(js.suggestedQuestions[0]) : null
-                      if (!q) { toast({ title: 'Sem sugestão', description: 'Nenhuma pergunta sugerida no momento.' }); return }
-                      try { await navigator.clipboard.writeText(q) } catch {}
-                      toast({ title: 'Sugestão pronta', description: q })
-                    } catch (e: any) {
-                      toast({ title: 'Falha na Próx. Ação', description: String(e?.message || e), variant: 'destructive' })
-                    }
-                  }}>Próx. Ação</Button>
-                  {/* Pedir ao Agente: sugere texto e oferece 3 opções */}
-                  <Button size="sm" variant="default" onClick={async () => {
-                    try {
-                      if (!selectedLead?.id) return
-                      setSuggestLoading(true)
-                      setSuggestText('')
-                      const r = await apiFetch('/api/agent/suggest-followup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lead_id: selectedLead.id }) })
-                      const js = await r.json().catch(() => ({} as any))
-                      const txt = String(js?.sugestao || '').trim()
-                      if (!txt) { toast({ title: 'Sem sugestão', description: 'O agente não retornou texto.' }); return }
-                      setSuggestText(txt)
-                      toast({ title: 'Sugestão pronta', description: txt })
-                    } catch (e: any) {
-                      toast({ title: 'Erro ao sugerir follow‑up', description: String(e?.message || e), variant: 'destructive' })
-                    } finally { setSuggestLoading(false) }
-                  }}>{suggestLoading ? 'Gerando…' : 'Pedir ao Agente'}</Button>
-                </div>
-                <AILeadProfile phone={selectedLead.phone} />
-                {suggestText && (
-                  <div className="mt-3 border-t pt-3">
-                    <Label className="text-sm font-medium">Sugestão de Follow‑up</Label>
-                    <div className="mt-2 p-2 rounded-md bg-muted text-sm whitespace-pre-wrap">{suggestText}</div>
-                    <div className="flex flex-wrap gap-2 mt-3">
-                      <Button size="sm" variant="default" onClick={() => {
-                        // Criar tarefa
-                        if (!selectedLead?.id) return
-                        createActivity({ lead_id: selectedLead.id, type: 'task', title: 'Follow‑up', description: suggestText, completed: false } as any, {
-                          onSuccess: () => toast({ title: 'Tarefa criada', description: 'Follow‑up salvo como tarefa.' }),
-                          onError: (e: any) => toast({ title: 'Erro', description: String(e?.message || e), variant: 'destructive' })
-                        })
-                      }}>Criar tarefa</Button>
-                      <Button size="sm" variant="secondary" onClick={() => {
-                        // Enviar agora pelo WhatsApp
-                        if (!selectedLead?.id) return
-                        setSelectedChatLeadId(selectedLead.id)
-                        setQuickChatPrefill(suggestText)
-                        setQuickChatAutoSend(true)
-                        setIsQuickChatOpen(true)
-                      }}>Enviar agora pelo WhatsApp</Button>
-                      <Button size="sm" variant="outline" onClick={() => {
-                        // Salvar como nota
-                        if (!selectedLead?.id) return
-                        createActivity({ lead_id: selectedLead.id, type: 'note', title: 'Insight do Agente', description: suggestText, completed: false } as any, {
-                          onSuccess: () => toast({ title: 'Nota salva', description: 'Insight salvo na timeline.' }),
-                          onError: (e: any) => toast({ title: 'Erro', description: String(e?.message || e), variant: 'destructive' })
-                        })
-                      }}>Salvar como nota</Button>
-                    </div>
-                  </div>
-                )}
-              </div>
-              <div className="rounded-md border p-3">
-                <Label className="text-sm font-medium">Lead AI Score</Label>
-                <AILeadScore leadId={selectedLead.id} />
-              </div>
-              {/* Timeline resumida: últimas 5 atividades/comunicações/propostas */}
-              <div>
-                <Label className="text-sm font-medium">Timeline</Label>
-                <LeadTimeline leadId={selectedLead.id} />
-              </div>
+              {/* Smart Card do Lead */}
+              <LeadSmartCard lead={selectedLead} />
             </div>
           )}
         </DialogContent>
